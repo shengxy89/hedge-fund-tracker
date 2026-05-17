@@ -1,0 +1,16 @@
+version: '3.9'
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: hedge_fund_db
+    environment:
+      POSTGRES_USER: hedge
+      POSTGRES_PASSWORD: hedge123
+      POSTGRES_DB: hedge_fund_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:

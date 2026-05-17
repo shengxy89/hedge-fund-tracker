@@ -1,0 +1,19 @@
+name: Daily 13F Update
+on:
+  schedule:
+    - cron: '0 6 * * *'  # UTC 06:00 daily
+  workflow_dispatch:       # 手动触发
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -e .
+      - run: python scripts/run_full_pipeline.py
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
