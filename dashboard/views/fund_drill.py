@@ -63,13 +63,13 @@ def _render_fund_overview(
         holdings.head(10)["weight_pct"].sum() / 100 if not holdings.empty else 0
     )
 
-    # 换手率估算
+    # 新建/清仓占比（非真实换手率，仅描述本季新建+清仓仓位占当前持仓数的比例）
     deltas = get_fund_deltas(fund_id, quarter)
-    turnover = None
+    new_sold_ratio = None
     if not deltas.empty and holding_count > 0:
-        turnover = len(deltas[deltas["action"].isin(["NEW", "SOLD"])]) / holding_count
+        new_sold_ratio = len(deltas[deltas["action"].isin(["NEW", "SOLD"])]) / holding_count
 
-    kpi_fund_cards(total_val, holding_count, top10_weight, turnover)
+    kpi_fund_cards(total_val, holding_count, top10_weight, new_sold_ratio)
 
     col1, col2 = st.columns(2)
     with col1:

@@ -174,7 +174,7 @@ def run_delta_engine(fund_ids: list[int] | None = None):
     from db.engine import get_session
     from db.models import Fund
 
-    with get_session() as session:
+    with get_session(read_only=True) as session:
         if fund_ids is None:
             funds = session.query(Fund).all()
         else:
@@ -216,14 +216,21 @@ def run_delta_engine(fund_ids: list[int] | None = None):
 
     combined = pl.concat(all_deltas)
 
-    # 写入数据库（先清空旧数据）
+    # 增量替换：仅删除本次计算涉及的 quarter（而非全表 TRUNCATE）
+    quarters_touched = sorted({q for q in combined["quarter"].to_list() if q})
     with engine.connect() as conn:
-        conn.execute(text("DELETE FROM holding_deltas"))
+        if quarters_touched:
+            placeholders = ",".join(f":q{i}" for i in range(len(quarters_touched)))
+            params = {f"q{i}": q for i, q in enumerate(quarters_touched)}
+            conn.execute(text(f"DELETE FROM holding_deltas WHERE quarter IN ({placeholders})"), params)
         conn.commit()
 
     # 使用 pandas 作为中间格式写入（SQLAlchemy 兼容性更好）
     pd_df = combined.to_pandas()
     pd_df.to_sql("holding_deltas", engine, if_exists="append", index=False)
 
-    logger.info(f"[OK] Delta engine complete. {len(pd_df)} delta records computed.")
+    logger.info(
+        f"[OK] Delta engine complete. {len(pd_df)} delta records computed "
+        f"for quarters {quarters_touched}."
+    )
     return len(pd_df)

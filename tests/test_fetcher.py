@@ -5,7 +5,7 @@ import pytest
 import pytest_asyncio
 from unittest.mock import AsyncMock, patch
 
-from etl.fetcher import fetch_filings_forms13f, RateLimiter
+from etl.fetcher import fetch_filings_sec, RateLimiter
 
 
 @pytest.mark.asyncio
@@ -20,13 +20,25 @@ async def test_rate_limiter():
 
 
 @pytest.mark.asyncio
-async def test_fetch_filings_forms13f_mock():
-    mock_data = [
-        {"accession_number": "ACC1", "filing_date": "2024-01-01", "report_date": "2023-12-31", "form_type": "13F-HR"},
-        {"accession_number": "ACC2", "filing_date": "2024-04-01", "report_date": "2024-03-31", "form_type": "13F-HR"},
-    ]
+async def test_fetch_filings_sec_mock():
+    """fetch_filings_sec 解析 SEC EDGAR submissions JSON,验证 13F-HR 过滤与排序"""
+    mock_data = {
+        "filings": {
+            "recent": {
+                "form": ["13F-HR", "10-K", "13F-HR/A"],
+                "accessionNumber": ["0001-22-33", "0002-33-44", "0003-55-66"],
+                "filingDate": ["2024-01-15", "2024-02-01", "2024-04-20"],
+                "reportDate": ["2023-12-31", "2023-12-31", "2024-03-31"],
+            }
+        }
+    }
     with patch("etl.fetcher._get", new_callable=AsyncMock) as mock_get:
-        mock_get.return_value = {"filings": mock_data}
-        result = await fetch_filings_forms13f("1067983", quarters=2)
+        mock_get.return_value = mock_data
+        result = await fetch_filings_sec("1067983", quarters=3)
+        # 2 个 13F-HR (一个原始 + 一个 amendment)
         assert len(result) == 2
-        assert result[0]["form_type"] == "13F-HR"
+        # 按 report_date 降序：2024-03-31 在前
+        assert result[0]["report_date"] == "2024-03-31"
+        # amendment 标记正确
+        amendments = [f for f in result if f["is_amendment"]]
+        assert len(amendments) == 1

@@ -13,7 +13,12 @@ from dashboard.data_access import get_consensus_fund_detail, get_consensus_kpi, 
 from dashboard.utils.formatters import format_currency, format_pct, get_action_badge
 
 
-TOTAL_FUNDS = 40  # 当前追踪基金总数，用于 crowding 参考
+def _get_total_active_funds() -> int:
+    """查询当前追踪中的基金总数（动态获取，避免硬编码）"""
+    from sqlalchemy import text
+    from db.engine import engine
+    with engine.connect() as conn:
+        return int(conn.execute(text("SELECT COUNT(*) FROM funds WHERE is_active = 1")).scalar() or 1)
 
 
 def _signal_strength_badge(score: float) -> str:
@@ -28,12 +33,13 @@ def _signal_strength_badge(score: float) -> str:
 
 
 def _crowding_badge(holder_count: int, crowding_score: float) -> str:
-    """拥挤度标签"""
-    if holder_count >= 15:
+    """拥挤度标签（基于 crowding_score 比率判定，不依赖硬编码基金总数）"""
+    score = crowding_score or 0
+    if score >= 0.375:
         return f"🔥 高度拥挤 ({holder_count})"
-    elif holder_count >= 8:
+    elif score >= 0.20:
         return f"🟠 中度拥挤 ({holder_count})"
-    elif holder_count >= 4:
+    elif score >= 0.10:
         return f"🟡 轻度拥挤 ({holder_count})"
     return f"🟢 冷门 ({holder_count})"
 
@@ -91,14 +97,15 @@ def _render_signals_table(df: pd.DataFrame, quarter: str) -> None:
         fc = int(row["fund_count"])
         avg_wc = row["avg_weight_change_pct"]
         hc = int(row.get("holder_count", 0) or 0)
+        cs = float(row.get("crowding_score", 0) or 0)
 
         if action == "NEW":
-            if hc >= 10:
-                return f"{fc}家基金**新建仓**已拥挤标的（共{hc}家持有）"
-            elif hc >= 5:
-                return f"{fc}家基金**新建仓**轻度拥挤标的（共{hc}家持有）"
+            if cs >= 0.20:
+                return f"{fc}家基金**新建仓**已拥挤标的（共{hc}家持有，拥挤度{cs:.0%}）"
+            elif cs >= 0.10:
+                return f"{fc}家基金**新建仓**轻度拥挤标的（共{hc}家持有，拥挤度{cs:.0%}）"
             else:
-                return f"{fc}家基金**新建仓**冷门标的（仅{hc}家持有）"
+                return f"{fc}家基金**新建仓**冷门标的（仅{hc}家持有，拥挤度{cs:.0%}）"
         elif action == "SOLD":
             return f"{fc}家基金**清仓**，原平均权重{abs(avg_wc):.1f}%"
         elif action == "ADD":
@@ -151,7 +158,7 @@ def _render_signals_table(df: pd.DataFrame, quarter: str) -> None:
                 format="%.1%",
                 min_value=0,
                 max_value=1,
-                help="持有基金数 / 总追踪基金数（40家）",
+                help=f"持有基金数 / 总追踪基金数（当前 {_get_total_active_funds()} 家）",
             ),
             "信号强度": st.column_config.TextColumn(width="small"),
             "信号描述": st.column_config.TextColumn(width="large"),
@@ -231,18 +238,20 @@ def render_consensus_view(quarter: str) -> None:
         "识别多基金对同一标的的共识调仓行为。"
     )
 
+    total_funds = _get_total_active_funds()
+
     # 说明
     with st.expander("📖 指标说明", expanded=False):
-        st.markdown("""
+        st.markdown(f"""
         - **平均权重变化%**: 参与共识的基金，该标的权重变化的平均值。
           - NEW = 建仓后权重（原权重为0）
           - SOLD = -原权重（现权重为0）
           - ADD / REDUCE = 现权重 - 原权重
         - **持有基金数**: 当前季度**总共**有多少家基金持有该标的（不限于调仓的基金）。
-        - **拥挤度**: 持有基金数 / 总追踪基金数（40家）。
-          - 🔥 ≥37.5% (15家): 高度拥挤
-          - 🟠 ≥20% (8家): 中度拥挤
-          - 🟡 ≥10% (4家): 轻度拥挤
+        - **拥挤度**: 持有基金数 / 总追踪基金数（当前 {total_funds} 家）。
+          - 🔥 ≥37.5%: 高度拥挤
+          - 🟠 ≥20%: 中度拥挤
+          - 🟡 ≥10%: 轻度拥挤
           - 🟢 <10%: 冷门标的
         - **信号强度** = 参与基金数 × |平均权重变化%|
         """)

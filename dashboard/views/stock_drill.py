@@ -57,21 +57,18 @@ def render_stock_drill_view(quarter: str) -> None:
     cusip = selected["cusip"]
     stock_name = selected["stock_name"]
 
-    # 如果无 ticker，用 cusip 查 holdings
-    query_key = ticker if ticker else cusip
-
-    # KPI
-    holders = get_stock_holders(query_key, quarter) if ticker else pd.DataFrame()
-    if holders.empty and cusip:
-        # fallback: 用 cusip 直接查
+    # 优先用 ticker 查询（普通股）；无 ticker 时用 cusip 查询（国际股/无 ticker 标的）
+    if ticker:
+        holders = get_stock_holders(ticker, quarter)
+        stock_info = get_stock_info(ticker)
+    else:
         holders = _get_holders_by_cusip(cusip, quarter)
-
-    stock_info = get_stock_info(ticker) if ticker else {"name": stock_name}
+        stock_info = {"name": stock_name}
 
     _render_stock_header(stock_info, ticker, stock_name, holders, quarter)
 
     if holders.empty:
-        st.warning(f"No holding data found for {query_key} in {quarter}.")
+        st.warning(f"No holding data found for {ticker or cusip} in {quarter}.")
         return
 
     # 主体 3 列

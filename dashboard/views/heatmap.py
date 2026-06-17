@@ -108,37 +108,45 @@ def _render_position_heatmap(
     )
     pivot = pivot.reindex(fund_order)
 
-    # hover 信息
+    # hover 信息：用三个 pivot 矩阵一次性构造，避免逐 cell 的 df[...] 查询
     hover_details = df.pivot_table(
         index="fund_name",
         columns="ticker",
         values="action",
         aggfunc="first",
-    )
-    hover_details = hover_details.reindex(index=pivot.index, columns=pivot.columns)
+    ).reindex(index=pivot.index, columns=pivot.columns)
 
-    hover_texts = hover_details.copy().astype(object)
-    for fund in hover_texts.index:
-        for ticker in hover_texts.columns:
-            action = (
-                hover_details.at[fund, ticker]
-                if fund in hover_details.index and ticker in hover_details.columns
-                else None
-            )
-            if pd.isna(action):
-                hover_texts.at[fund, ticker] = "Not held"
-            else:
-                row = df[(df["fund_name"] == fund) & (df["ticker"] == ticker)]
-                if not row.empty:
-                    shares = row.iloc[0].get("shares", 0)
-                    value = row.iloc[0].get("value", 0)
-                    w = row.iloc[0].get("weight_pct", 0)
-                    hover_texts.at[fund, ticker] = (
-                        f"Action: {action}<br>Shares: {shares:,.0f}<br>"
-                        f"Value: ${value:,.0f}K<br>Weight: {w:.2f}%"
-                    )
-                else:
-                    hover_texts.at[fund, ticker] = f"Action: {action}"
+    shares_matrix = df.pivot_table(
+        index="fund_name", columns="ticker", values="shares", aggfunc="first"
+    ).reindex(index=pivot.index, columns=pivot.columns)
+
+    value_matrix = df.pivot_table(
+        index="fund_name", columns="ticker", values="value", aggfunc="first"
+    ).reindex(index=pivot.index, columns=pivot.columns)
+
+    weight_matrix = df.pivot_table(
+        index="fund_name", columns="ticker", values="weight_pct", aggfunc="first"
+    ).reindex(index=pivot.index, columns=pivot.columns)
+
+    # 向量化构造 hover 文本
+    def _build_hover(action, shares, value, weight):
+        if pd.isna(action):
+            return "Not held"
+        s = 0 if pd.isna(shares) else float(shares)
+        v = 0 if pd.isna(value) else float(value)
+        w = 0 if pd.isna(weight) else float(weight)
+        return f"Action: {action}<br>Shares: {s:,.0f}<br>Value: ${v:,.0f}K<br>Weight: {w:.2f}%"
+
+    hover_texts = pd.DataFrame(
+        [
+            [_build_hover(hover_details.at[f, t], shares_matrix.at[f, t],
+                          value_matrix.at[f, t], weight_matrix.at[f, t])
+             for t in pivot.columns]
+            for f in pivot.index
+        ],
+        index=pivot.index,
+        columns=pivot.columns,
+    )
 
     st.write(f"Displaying {len(pivot)} funds x {len(pivot.columns)} stocks")
     render_heatmap(pivot, f"Position Changes — {quarter}", hover_texts=hover_texts)

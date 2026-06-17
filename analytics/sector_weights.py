@@ -93,14 +93,18 @@ def run_sector_weights(quarter: Optional[str] = None):
 
     combined = pl.concat(all_weights)
 
-    # 清空旧数据并写入
+    # 增量替换：仅删除本次计算涉及的 quarter
+    quarters_touched = sorted({q for q in combined["quarter"].to_list() if q})
     with engine.connect() as conn:
-        conn.execute(text("DELETE FROM sector_weights"))
+        if quarters_touched:
+            placeholders = ",".join(f":q{i}" for i in range(len(quarters_touched)))
+            params = {f"q{i}": q for i, q in enumerate(quarters_touched)}
+            conn.execute(text(f"DELETE FROM sector_weights WHERE quarter IN ({placeholders})"), params)
         conn.commit()
 
     import pandas as pd
     pd_df = combined.to_pandas()
     pd_df.to_sql("sector_weights", engine, if_exists="append", index=False)
 
-    logger.info(f"[OK] Sector weights complete. {len(pd_df)} records computed.")
+    logger.info(f"[OK] Sector weights complete. {len(pd_df)} records computed for quarters {quarters_touched}.")
     return len(pd_df)

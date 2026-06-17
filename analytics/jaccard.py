@@ -114,14 +114,18 @@ def run_jaccard(quarter: Optional[str] = None):
 
     combined = pl.concat(all_overlaps)
 
-    # 清空旧数据并写入
+    # 增量替换：仅删除本次计算涉及的 quarter
+    quarters_touched = sorted({q for q in combined["quarter"].to_list() if q})
     with engine.connect() as conn:
-        conn.execute(text("DELETE FROM fund_overlaps"))
+        if quarters_touched:
+            placeholders = ",".join(f":q{i}" for i in range(len(quarters_touched)))
+            params = {f"q{i}": q for i, q in enumerate(quarters_touched)}
+            conn.execute(text(f"DELETE FROM fund_overlaps WHERE quarter IN ({placeholders})"), params)
         conn.commit()
 
     import pandas as pd
     pd_df = combined.to_pandas()
     pd_df.to_sql("fund_overlaps", engine, if_exists="append", index=False)
 
-    logger.info(f"[OK] Jaccard complete. {len(pd_df)} overlap records computed.")
+    logger.info(f"[OK] Jaccard complete. {len(pd_df)} overlap records computed for quarters {quarters_touched}.")
     return len(pd_df)

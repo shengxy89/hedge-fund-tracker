@@ -122,6 +122,7 @@ class HoldingDelta(Base):
     value_change = Column(BigInteger, nullable=False)
     weight_prev = Column(Float, default=0)
     weight_curr = Column(Float, default=0)
+    weight_change_pct = Column(Float, comment="权重变化 = weight_curr - weight_prev")
 
     __table_args__ = (
         UniqueConstraint("fund_id", "cusip", "put_call", "quarter", name="uq_delta"),
@@ -189,3 +190,21 @@ class SectorWeight(Base):
     __table_args__ = (
         UniqueConstraint("fund_id", "quarter", "sector", name="uq_sector_weight"),
     )
+
+
+class EtlRun(Base):
+    """ETL 运行日志表 — 记录每次 ETL/分析运行的状态、统计、错误"""
+    __tablename__ = "etl_runs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    run_type = Column(String(30), nullable=False, comment="etl | analytics | full_pipeline")
+    started_at = Column(DateTime, nullable=False, default=func.now())
+    finished_at = Column(DateTime, comment="完成时间（NULL 表示运行中）")
+    status = Column(String(20), nullable=False, comment="success | partial | failed | running")
+    funds_total = Column(Integer, default=0, comment="目标基金数")
+    funds_success = Column(Integer, default=0)
+    funds_failed = Column(Integer, default=0)
+    funds_no_filings = Column(Integer, default=0)
+    holdings_inserted = Column(Integer, default=0)
+    error_message = Column(Text, comment="失败时的错误摘要")
+    meta = Column(Text, comment="JSON 序列化的额外元信息")

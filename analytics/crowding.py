@@ -44,11 +44,14 @@ def get_crowding_report(quarter: str, min_holders: int = 2) -> pl.DataFrame:
     if df.is_empty():
         return df
 
-    # 获取总基金数
-    total_funds_query = "SELECT COUNT(DISTINCT fund_id) FROM holdings WHERE report_date = :report_date"
+    # 获取追踪中基金总数（拥挤度分母应用所有追踪基金，而非当季有持仓的基金数）
+    total_funds_query = "SELECT COUNT(*) FROM funds WHERE is_active = 1"
     with engine.connect() as conn:
-        result = conn.execute(text(total_funds_query), {"report_date": report_date})
+        result = conn.execute(text(total_funds_query))
         total_funds = result.scalar() or 1
+
+    if total_funds <= 0:
+        total_funds = 1
 
     df = df.with_columns([
         (pl.col("holder_count") / total_funds).alias("crowding_score"),

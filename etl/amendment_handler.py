@@ -25,9 +25,13 @@ def deduplicate_filings(filings: list[dict]) -> list[dict]:
             result.append(group[0])
             continue
 
-        # 分离 amendment 和原始版
-        amendments = [f for f in group if f.get("is_amendment") or "/A" in f.get("form_type", "")]
-        originals = [f for f in group if f not in amendments]
+        # 用索引集合标记 amendment，避免对 dict 做 O(n²) 的 `in` 比较
+        amendment_idx = {
+            i for i, f in enumerate(group)
+            if f.get("is_amendment") or "/A" in f.get("form_type", "")
+        }
+        amendments = [group[i] for i in amendment_idx]
+        originals = [group[i] for i in range(len(group)) if i not in amendment_idx]
 
         if amendments:
             # 保留 filing_date 最新的 amendment

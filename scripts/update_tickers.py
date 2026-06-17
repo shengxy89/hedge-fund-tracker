@@ -55,16 +55,28 @@ async def update_all_tickers():
         resolved = await resolve_cusips_batch(batch)
         resolved_tickers = {k: v.get("ticker") for k, v in resolved.items() if v.get("ticker")}
 
-        # 5. 更新 holdings 表
+        # 5. 批量更新 holdings 表：用 CASE WHEN 一条 UPDATE 解决所有 CUSIP→ticker 映射
         if resolved_tickers:
             with get_session() as session:
+                # 按 ticker 分桶（多条 CUSIP 映射到同一 ticker 时合并 IN 子句）
+                ticker_to_cusips: dict[str, list[str]] = {}
                 for cusip, ticker in resolved_tickers.items():
-                    count = (
-                        session.query(Holding)
-                        .filter(Holding.cusip == cusip, Holding.ticker.is_(None))
-                        .update({Holding.ticker: ticker}, synchronize_session=False)
+                    ticker_to_cusips.setdefault(ticker, []).append(cusip)
+
+                total_in_batch = 0
+                for ticker, cusips in ticker_to_cusips.items():
+                    placeholders = ",".join([f":c{j}" for j in range(len(cusips))])
+                    params = {f"c{j}": c for j, c in enumerate(cusips)}
+                    params["t"] = ticker
+                    result = session.execute(
+                        text(
+                            f"UPDATE holdings SET ticker = :t "
+                            f"WHERE ticker IS NULL AND cusip IN ({placeholders})"
+                        ),
+                        params,
                     )
-                    total_updated += count
+                    total_in_batch += result.rowcount or 0
+                total_updated += total_in_batch
 
         logger.info(
             f"Batch {i // batch_size + 1}/{(len(missing) + batch_size - 1) // batch_size}: "

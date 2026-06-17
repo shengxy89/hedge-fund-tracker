@@ -11,63 +11,15 @@ from loguru import logger
 from config.settings import get_settings
 from db.engine import get_session
 from db.models import Security
+from etl.stock_map import TICKER_TO_SECTOR as BUILTIN_SECTOR_MAP
 
 settings = get_settings()
 
 # 进程级内存缓存，避免同一批次内重复查询
 _memory_cache: dict[str, dict] = {}
 
-# 内置 S&P 500  sector 映射（常用股票）
-BUILTIN_SECTOR_MAP = {
-    "AAPL": ("Information Technology", "Technology Hardware, Storage & Peripherals"),
-    "MSFT": ("Information Technology", "Systems Software"),
-    "NVDA": ("Information Technology", "Semiconductors"),
-    "AMZN": ("Consumer Discretionary", "Broadline Retail"),
-    "GOOGL": ("Communication Services", "Interactive Media & Services"),
-    "GOOG": ("Communication Services", "Interactive Media & Services"),
-    "META": ("Communication Services", "Interactive Media & Services"),
-    "TSLA": ("Consumer Discretionary", "Automobiles"),
-    "BRK-B": ("Financials", "Multi-Sector Holdings"),
-    "BRK.B": ("Financials", "Multi-Sector Holdings"),
-    "JPM": ("Financials", "Diversified Banks"),
-    "V": ("Financials", "Transaction & Payment Processing Services"),
-    "JNJ": ("Health Care", "Pharmaceuticals"),
-    "UNH": ("Health Care", "Managed Health Care"),
-    "XOM": ("Energy", "Integrated Oil & Gas"),
-    "WMT": ("Consumer Staples", "Consumer Staples Merchandise Retail"),
-    "PG": ("Consumer Staples", "Personal Care Products"),
-    "MA": ("Financials", "Transaction & Payment Processing Services"),
-    "HD": ("Consumer Discretionary", "Home Improvement Retail"),
-    "LLY": ("Health Care", "Pharmaceuticals"),
-    "CVX": ("Energy", "Integrated Oil & Gas"),
-    "MRK": ("Health Care", "Pharmaceuticals"),
-    "PEP": ("Consumer Staples", "Soft Drinks & Non-alcoholic Beverages"),
-    "COST": ("Consumer Staples", "Consumer Staples Merchandise Retail"),
-    "ABBV": ("Health Care", "Biotechnology"),
-    "KO": ("Consumer Staples", "Soft Drinks & Non-alcoholic Beverages"),
-    "AVGO": ("Information Technology", "Semiconductors"),
-    "ADBE": ("Information Technology", "Application Software"),
-    "CRM": ("Information Technology", "Application Software"),
-    "NFLX": ("Communication Services", "Movies & Entertainment"),
-    "TMO": ("Health Care", "Life Sciences Tools & Services"),
-    "AMD": ("Information Technology", "Semiconductors"),
-    "ACN": ("Information Technology", "IT Consulting & Other Services"),
-    "LIN": ("Materials", "Industrial Gases"),
-    "DIS": ("Communication Services", "Movies & Entertainment"),
-    "VZ": ("Communication Services", "Integrated Telecommunication Services"),
-    "CMCSA": ("Communication Services", "Cable & Satellite"),
-    "INTC": ("Information Technology", "Semiconductors"),
-    "QCOM": ("Information Technology", "Semiconductors"),
-    "TXN": ("Information Technology", "Semiconductors"),
-    "NKE": ("Consumer Discretionary", "Apparel, Accessories & Luxury Goods"),
-    "INTU": ("Information Technology", "Application Software"),
-    "HON": ("Industrials", "Industrial Conglomerates"),
-    "AMGN": ("Health Care", "Biotechnology"),
-    "LOW": ("Consumer Discretionary", "Home Improvement Retail"),
-    "SPY": ("", "ETF"),
-    "QQQ": ("", "ETF"),
-    "IWM": ("", "ETF"),
-}
+# 内置 S&P 500 sector 映射来自 etl/stock_map.TICKER_TO_SECTOR（统一来源）
+
 
 
 async def _openfigi_request(payload: list[dict]) -> list[dict]:
@@ -151,7 +103,7 @@ async def resolve_from_fmp(ticker: str) -> Optional[tuple[str, str]]:
 
 def get_security_from_db(cusip: str) -> Optional[dict]:
     """查询本地 securities 表缓存，返回 plain dict（避免 DetachedInstanceError）"""
-    with get_session() as session:
+    with get_session(read_only=True) as session:
         sec = session.query(Security).filter(Security.cusip == cusip).first()
         if sec is None:
             return None

@@ -18,17 +18,20 @@ settings = get_settings()
 
 
 class RateLimiter:
-    """异步速率限制器"""
+    """异步速率限制器（协程安全）"""
     def __init__(self, delay_sec: float):
         self.delay = delay_sec
         self._last_call: Optional[float] = None
+        self._lock = asyncio.Lock()
 
     async def acquire(self):
-        if self._last_call is not None:
-            elapsed = asyncio.get_event_loop().time() - self._last_call
-            if elapsed < self.delay:
-                await asyncio.sleep(self.delay - elapsed)
-        self._last_call = asyncio.get_event_loop().time()
+        async with self._lock:
+            loop = asyncio.get_event_loop()
+            if self._last_call is not None:
+                elapsed = loop.time() - self._last_call
+                if elapsed < self.delay:
+                    await asyncio.sleep(self.delay - elapsed)
+            self._last_call = loop.time()
 
 
 rate_limiter = RateLimiter(settings.rate_limit_delay)
@@ -59,38 +62,6 @@ async def _get(url: str, headers: Optional[dict] = None, client: Optional[httpx.
     finally:
         if client is None:
             await c.aclose()
-
-
-async def fetch_filings_forms13f(cik: str, quarters: int = 8, client: Optional[httpx.AsyncClient] = None) -> list[dict]:
-    """
-    从 forms13f.com API 获取指定基金的 filings 列表
-    返回最近 {quarters} 个季度的 13F-HR / 13F-HR/A 记录
-    """
-    base = settings.forms13f_api_base.rstrip("/")
-    url = f"{base}/filings?cik={cik}"
-    try:
-        data = await _get(url, client=client)
-        filings = data if isinstance(data, list) else data.get("filings", [])
-        # 过滤 13F-HR 相关
-        filings = [f for f in filings if "13F-HR" in f.get("form_type", "")]
-        # 按 report_date 降序，取最近 quarters 个
-        filings.sort(key=lambda x: x.get("report_date", ""), reverse=True)
-        return filings[:quarters]
-    except Exception as e:
-        logger.error(f"forms13f API failed for CIK {cik}: {e}")
-        return []
-
-
-async def fetch_holdings_forms13f(accession_number: str, client: Optional[httpx.AsyncClient] = None) -> list[dict]:
-    """从 forms13f.com API 获取单个 filing 的持仓明细"""
-    base = settings.forms13f_api_base.rstrip("/")
-    url = f"{base}/filings/{accession_number}/holdings"
-    try:
-        data = await _get(url, client=client)
-        return data if isinstance(data, list) else data.get("holdings", [])
-    except Exception as e:
-        logger.error(f"forms13f holdings API failed for {accession_number}: {e}")
-        return []
 
 
 async def fetch_filings_sec(cik: str, quarters: int = 8, client: Optional[httpx.AsyncClient] = None) -> list[dict]:
@@ -134,6 +105,19 @@ async def fetch_filings_sec(cik: str, quarters: int = 8, client: Optional[httpx.
         return []
 
 
+@retry(stop=stop_after_attempt(settings.max_retries), wait=wait_exponential(multiplier=1, min=1, max=10))
+async def _try_fetch_xml(client: httpx.AsyncClient, url: str) -> str:
+    """带重试的 XML 抓取，仅 200 且非空才返回内容。"""
+    await rate_limiter.acquire()
+    resp = await client.get(url, headers={"User-Agent": settings.sec_user_agent})
+    if resp.status_code == 200 and resp.text:
+        return resp.text
+    # 让 tenacity 看到「失败」就走重试：抛 HTTPStatusError
+    raise httpx.HTTPStatusError(
+        f"status={resp.status_code} for {url}", request=resp.request, response=resp
+    )
+
+
 async def fetch_holdings_sec(cik: str, accession_number: str, client: Optional[httpx.AsyncClient] = None) -> list[dict]:
     """
     从 SEC EDGAR XML 获取持仓明细
@@ -144,48 +128,55 @@ async def fetch_holdings_sec(cik: str, accession_number: str, client: Optional[h
 
     acc_no_dash = accession_number.replace("-", "")
     base_url = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc_no_dash}"
-    await rate_limiter.acquire()
+
+    owns_client = client is None
     c = client or httpx.AsyncClient(timeout=30)
 
-    async def _try_fetch(url: str) -> str:
-        resp = await c.get(url, headers={"User-Agent": settings.sec_user_agent})
-        if resp.status_code == 200:
-            return resp.text
-        return ""
+    def _has_info_table(text: str) -> bool:
+        """检测 XML 是否包含 infoTable（支持 default ns 和 prefixed ns）"""
+        if not text:
+            return False
+        return "<infoTable>" in text or "<ns1:infoTable>" in text or ":infoTable>" in text
 
     try:
-        def _has_info_table(text: str) -> bool:
-            """检测 XML 是否包含 infoTable（支持 default ns 和 prefixed ns）"""
-            if not text:
-                return False
-            return "<infoTable>" in text or "<ns1:infoTable>" in text or ":infoTable>" in text
-
         # 1. 尝试常见的 infotable.xml
-        xml_text = await _try_fetch(f"{base_url}/infotable.xml")
+        try:
+            xml_text = await _try_fetch_xml(c, f"{base_url}/infotable.xml")
+        except httpx.HTTPError:
+            xml_text = ""
 
         # 2. 尝试 primary_doc.xml（某些旧版 filing 的 holdings 在其中）
         if not _has_info_table(xml_text):
-            xml_text = await _try_fetch(f"{base_url}/primary_doc.xml")
+            try:
+                xml_text = await _try_fetch_xml(c, f"{base_url}/primary_doc.xml")
+            except httpx.HTTPError:
+                xml_text = ""
 
         # 3. 如果仍然没有找到 infoTable，从目录列表中查找其他 XML 文件
         if not _has_info_table(xml_text):
-            dir_resp = await c.get(f"{base_url}/", headers={"User-Agent": settings.sec_user_agent})
-            if dir_resp.status_code == 200:
+            try:
+                dir_resp = await _try_fetch_xml(c, f"{base_url}/")
                 # 提取所有 .xml 链接（排除 primary_doc.xml）
-                links = re.findall(r'href="([^"]+\.xml)"', dir_resp.text)
-                for link in links:
-                    if "primary_doc" in link:
-                        continue
-                    # 构建完整 URL（相对链接补全为 base_url + link）
-                    if link.startswith("http"):
-                        xml_url = link
-                    elif link.startswith("/"):
-                        xml_url = f"https://www.sec.gov{link}"
-                    else:
-                        xml_url = f"{base_url}/{link}"
-                    xml_text = await _try_fetch(xml_url)
+                links = re.findall(r'href="([^"]+\.xml)"', dir_resp)
+            except httpx.HTTPError:
+                links = []
+
+            for link in links:
+                if "primary_doc" in link:
+                    continue
+                # 构建完整 URL（相对链接补全为 base_url + link）
+                if link.startswith("http"):
+                    xml_url = link
+                elif link.startswith("/"):
+                    xml_url = f"https://www.sec.gov{link}"
+                else:
+                    xml_url = f"{base_url}/{link}"
+                try:
+                    xml_text = await _try_fetch_xml(c, xml_url)
                     if _has_info_table(xml_text):
                         break
+                except httpx.HTTPError:
+                    continue
 
         if _has_info_table(xml_text):
             from etl.parser import parse_sec_13f_xml
@@ -197,30 +188,24 @@ async def fetch_holdings_sec(cik: str, accession_number: str, client: Optional[h
         logger.error(f"SEC holdings fetch failed for {accession_number}: {e}")
         return []
     finally:
-        if client is None:
+        if owns_client:
             await c.aclose()
 
 
-async def fetch_fund_data(cik: str, quarters: int = 8, skip_forms13f: bool = True) -> dict:
+async def fetch_fund_data(cik: str, quarters: int = 8) -> dict:
     """
-    获取单个基金的所有数据
+    获取单个基金的所有数据（数据源：SEC EDGAR）
+
     返回: {
         "cik": str,
         "filings": list[dict],
-        "holdings": dict[report_date, list[dict]]
+        "holdings": dict[report_date, list[dict]],
+        "source": "sec"
     }
     """
     async with httpx.AsyncClient(timeout=30) as client:
-        # forms13f.com API 当前不可用，直接跳过
-        if skip_forms13f:
-            filings = await fetch_filings_sec(cik, quarters, client=client)
-            source = "sec"
-        else:
-            filings = await fetch_filings_forms13f(cik, quarters, client=client)
-            source = "forms13f"
-            if not filings:
-                filings = await fetch_filings_sec(cik, quarters, client=client)
-                source = "sec"
+        filings = await fetch_filings_sec(cik, quarters, client=client)
+        source = "sec"
 
         holdings_map = {}
         for filing in filings:
@@ -228,10 +213,7 @@ async def fetch_fund_data(cik: str, quarters: int = 8, skip_forms13f: bool = Tru
             r_date = filing.get("report_date")
             if not acc or not r_date:
                 continue
-            if source == "forms13f":
-                h = await fetch_holdings_forms13f(acc, client=client)
-            else:
-                h = await fetch_holdings_sec(cik, acc, client=client)
+            h = await fetch_holdings_sec(cik, acc, client=client)
             if h:
                 holdings_map[r_date] = h
 

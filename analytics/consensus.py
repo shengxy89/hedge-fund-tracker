@@ -76,7 +76,7 @@ def compute_consensus(
     from sqlalchemy import text
 
     # 确定季度
-    with get_session() as session:
+    with get_session(read_only=True) as session:
         if quarter is None:
             result = session.execute(text("SELECT DISTINCT quarter FROM holding_deltas ORDER BY quarter"))
             quarters = [r[0] for r in result.fetchall()]
@@ -97,7 +97,7 @@ def compute_consensus(
     if fund_ids:
         delta_sql += f" AND d.fund_id IN ({','.join(map(str, fund_ids))})"
 
-    with get_session() as session:
+    with get_session(read_only=True) as session:
         result = session.execute(text(delta_sql), {"quarter": quarter})
         rows = result.mappings().all()
 
@@ -118,7 +118,7 @@ def compute_consensus(
           AND (put_call IS NULL OR put_call = '' OR put_call = 'NONE')
         GROUP BY cusip
     """
-    with get_session() as session:
+    with get_session(read_only=True) as session:
         result = session.execute(text(crowding_sql), {"report_date": report_date})
         crowding_rows = result.mappings().all()
 
@@ -215,7 +215,7 @@ def compute_consensus(
     )
 
     # 获取总基金数计算 crowding_score
-    with get_session() as session:
+    with get_session(read_only=True) as session:
         result = session.execute(text("SELECT COUNT(*) FROM funds WHERE is_active = 1"))
         total_funds = result.scalar() or 1
 
@@ -251,7 +251,7 @@ def write_consensus_to_db(
         return 0
 
     # 获取基金规模档次
-    with get_session() as session:
+    with get_session(read_only=True) as session:
         fund_tiers = _get_fund_size_tier(session, None)
 
     records: list[dict] = []

@@ -4,7 +4,7 @@ A comprehensive 13F holdings tracking and analytics system for 50+ active hedge 
 
 ## Features
 
-- **ETL Pipeline**: Automated data fetching from SEC EDGAR and forms13f.com API
+- **ETL Pipeline**: Automated data fetching from SEC EDGAR (submissions JSON + 13F XML infoTable)
 - **Delta Engine**: Track NEW / SOLD / ADD / REDUCE positions quarter-over-quarter
 - **Jaccard Analysis**: Measure stock-picking similarity between funds
 - **Crowding Score**: Identify consensus trades and crowded positions
@@ -21,29 +21,26 @@ pip install -e ".[dev]"
 
 # Copy environment file
 cp .env.example .env
-# Edit .env with your SEC User-Agent
+# Edit .env with your SEC User-Agent (required for EDGAR access)
 ```
 
 ### 2. Initialize Database
 
 ```bash
-# Using SQLite (default for local dev)
+# SQLite (default — DATABASE_URL=sqlite:///./hedge_fund.db in .env)
 python scripts/init_db.py
 python scripts/seed_funds.py
 ```
 
-For PostgreSQL with Docker:
-```bash
-docker-compose up -d
-```
+For PostgreSQL, uncomment the `DATABASE_URL` line in `.env` (or run `docker-compose up -d`).
 
 ### 3. Load Data
 
 ```bash
-# Option A: Use mock data for demonstration
+# Option A: Use mock data for demonstration (no network needed)
 python scripts/backfill.py --mock
 
-# Option B: Fetch real data from APIs (requires SEC User-Agent)
+# Option B: Fetch real data from SEC EDGAR (requires SEC User-Agent)
 python scripts/backfill.py
 ```
 
@@ -81,9 +78,10 @@ hedge_fund_tracker/
 
 ## Data Sources
 
-1. **Primary**: [forms13f.com API](https://forms13f.com/api-docs/)
-2. **Fallback**: SEC EDGAR XML
-3. **Optional**: Financial Modeling Prep API (for sector data)
+1. **Primary**: SEC EDGAR
+   - Submissions JSON: `https://data.sec.gov/submissions/CIK{cik_padded}.json` — for filing list
+   - 13F XML infoTable: `https://www.sec.gov/Archives/edgar/data/{cik}/{acc}/{infotable.xml}` — for holdings detail
+2. **Optional**: Financial Modeling Prep API (for sector data)
 
 ## Notes
 

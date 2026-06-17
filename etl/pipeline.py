@@ -2,14 +2,15 @@
 ETL Pipeline 主流程编排
 """
 import asyncio
-from datetime import date
+import json
+from datetime import date, datetime
 from typing import Optional
 
 from loguru import logger
 
 from config.settings import get_settings
 from db.engine import get_session, engine
-from db.models import Filing, Holding, Fund
+from db.models import EtlRun, Filing, Holding, Fund
 from etl.fetcher import fetch_fund_data
 from etl.amendment_handler import get_latest_filings_by_quarter
 from etl.cusip_resolver import resolve_cusips_batch
@@ -58,6 +59,19 @@ async def process_single_fund(fund_id: int, cik: str, name: str, quarters: int =
 
         # 2. 入库
         with get_session() as session:
+            # 一次性批量查询已存在的 Filing accession_number，避免逐个 N+1 查询
+            acc_numbers = [f.get("accession_number") for f in filings if f.get("accession_number")]
+            existing_acc_set: set[str] = set()
+            existing_by_acc: dict[str, Filing] = {}
+            if acc_numbers:
+                existing_filings = (
+                    session.query(Filing)
+                    .filter(Filing.accession_number.in_(acc_numbers))
+                    .all()
+                )
+                existing_acc_set = {f.accession_number for f in existing_filings}
+                existing_by_acc = {f.accession_number: f for f in existing_filings}
+
             total_holdings = 0
             for filing in filings:
                 acc = filing.get("accession_number")
@@ -74,8 +88,7 @@ async def process_single_fund(fund_id: int, cik: str, name: str, quarters: int =
                 except ValueError:
                     continue
 
-                # Upsert filing
-                existing = session.query(Filing).filter(Filing.accession_number == acc).first()
+                existing = existing_by_acc.get(acc)
                 if not existing:
                     f = Filing(
                         fund_id=fund_id,
@@ -171,6 +184,49 @@ async def process_single_fund(fund_id: int, cik: str, name: str, quarters: int =
         return {"fund": name, "status": "error", "error": str(e)}
 
 
+def _log_etl_run(
+    run_id: Optional[int],
+    *,
+    status: str,
+    funds_total: int,
+    funds_success: int,
+    funds_failed: int,
+    funds_no_filings: int,
+    holdings_inserted: int,
+    error_message: Optional[str] = None,
+    meta: Optional[dict] = None,
+) -> None:
+    """写入/更新 etl_runs 记录。run_id 为 None 时插入新记录并返回 id。"""
+    try:
+        with get_session() as session:
+            if run_id is None:
+                run = EtlRun(
+                    run_type="etl",
+                    started_at=datetime.utcnow(),
+                    status="running",
+                    funds_total=funds_total,
+                )
+                session.add(run)
+                session.flush()
+                return run.id
+            existing = session.get(EtlRun, run_id)
+            if existing is None:
+                return None
+            existing.finished_at = datetime.utcnow()
+            existing.status = status
+            existing.funds_total = funds_total
+            existing.funds_success = funds_success
+            existing.funds_failed = funds_failed
+            existing.funds_no_filings = funds_no_filings
+            existing.holdings_inserted = holdings_inserted
+            existing.error_message = error_message
+            existing.meta = json.dumps(meta, ensure_ascii=False) if meta else None
+            return existing.id
+    except Exception as e:
+        logger.warning(f"Failed to log ETL run: {e}")
+        return None
+
+
 async def run_etl_pipeline(fund_ciks: Optional[list[str]] = None, quarters: int = 8) -> dict:
     """
     ETL Pipeline 主编排
@@ -180,31 +236,48 @@ async def run_etl_pipeline(fund_ciks: Optional[list[str]] = None, quarters: int 
     """
     logger.info(f"Starting ETL pipeline for quarters={quarters}")
 
-    with get_session() as session:
-        query = session.query(Fund.fund_id, Fund.cik, Fund.name).filter(Fund.is_active == True)
+    with get_session(read_only=True) as session:
+        query = session.query(Fund.fund_id, Fund.cik, Fund.name).filter(Fund.is_active.is_(True))
         if fund_ciks:
             query = query.filter(Fund.cik.in_(fund_ciks))
         fund_rows = query.all()
 
     logger.info(f"Found {len(fund_rows)} funds to process")
 
-    # SQLite 不支持并发写入，顺序执行；PostgreSQL 可并发
-    db_type = engine.url.get_dialect().name
-    results = []
-    if db_type == "sqlite":
-        for fid, cik, name in fund_rows:
-            r = await process_single_fund(fid, cik, name, quarters)
-            results.append(r)
-    else:
-        semaphore = asyncio.Semaphore(5)
-        tasks = [process_single_fund(fid, cik, name, quarters, semaphore) for fid, cik, name in fund_rows]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+    run_id = _log_etl_run(
+        None, status="running",
+        funds_total=len(fund_rows), funds_success=0,
+        funds_failed=0, funds_no_filings=0, holdings_inserted=0,
+    )
+
+    try:
+        # SQLite 不支持并发写入，顺序执行；PostgreSQL 可并发
+        db_type = engine.url.get_dialect().name
+        results = []
+        if db_type == "sqlite":
+            for fid, cik, name in fund_rows:
+                r = await process_single_fund(fid, cik, name, quarters)
+                results.append(r)
+        else:
+            semaphore = asyncio.Semaphore(5)
+            tasks = [process_single_fund(fid, cik, name, quarters, semaphore) for fid, cik, name in fund_rows]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+    except Exception as e:
+        _log_etl_run(
+            run_id, status="failed",
+            funds_total=len(fund_rows), funds_success=0,
+            funds_failed=len(fund_rows), funds_no_filings=0,
+            holdings_inserted=0, error_message=str(e),
+            meta={"quarters": quarters},
+        )
+        raise
 
     summary = {
         "total": len(fund_rows),
         "success": 0,
         "failed": 0,
         "no_filings": 0,
+        "holdings_inserted": 0,
         "details": [],
     }
     for r in results:
@@ -213,12 +286,30 @@ async def run_etl_pipeline(fund_ciks: Optional[list[str]] = None, quarters: int 
             summary["details"].append({"status": "error", "error": str(r)})
         else:
             summary["details"].append(r)
+            summary["holdings_inserted"] += r.get("holdings", 0)
             if r["status"] == "success":
                 summary["success"] += 1
             elif r["status"] == "no_filings":
                 summary["no_filings"] += 1
             else:
                 summary["failed"] += 1
+
+    if summary["failed"] == 0 and summary["success"] > 0:
+        final_status = "success"
+    elif summary["success"] > 0:
+        final_status = "partial"
+    else:
+        final_status = "failed"
+
+    _log_etl_run(
+        run_id, status=final_status,
+        funds_total=summary["total"],
+        funds_success=summary["success"],
+        funds_failed=summary["failed"],
+        funds_no_filings=summary["no_filings"],
+        holdings_inserted=summary["holdings_inserted"],
+        meta={"quarters": quarters, "source": "sec"},
+    )
 
     logger.info(f"ETL complete: {summary['success']} success, {summary['failed']} failed, {summary['no_filings']} no filings")
     return summary

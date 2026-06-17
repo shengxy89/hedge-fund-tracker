@@ -25,11 +25,18 @@ SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
 
 
 @contextmanager
-def get_session() -> Session:
+def get_session(read_only: bool = False) -> Session:
+    """获取 Session。
+
+    Args:
+        read_only: True 时只读，不 commit（避免只读查询多余的磁盘写），
+                   出错仍会 rollback。
+    """
     session = SessionLocal()
     try:
         yield session
-        session.commit()
+        if not read_only:
+            session.commit()
     except Exception:
         session.rollback()
         raise

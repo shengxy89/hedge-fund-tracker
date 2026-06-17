@@ -71,7 +71,7 @@ def kpi_fund_cards(
     total_value: int,
     holding_count: int,
     top10_weight: float,
-    turnover: float | None,
+    new_sold_ratio: float | None,
 ) -> None:
     """基金穿透页的 4 个 KPI 卡.
 
@@ -79,7 +79,7 @@ def kpi_fund_cards(
         total_value: 总市值（千美元）.
         holding_count: 持仓数量.
         top10_weight: Top 10 集中度（小数）.
-        turnover: 换手率（小数）.
+        new_sold_ratio: 新建+清仓占比 = (NEW + SOLD) / 当前持仓数（小数）.
     """
     metrics = [
         {"label": "Total Value", "value": format_currency(total_value)},
@@ -90,9 +90,9 @@ def kpi_fund_cards(
             "help": "Weight % of largest 10 positions",
         },
         {
-            "label": "Turnover",
-            "value": format_pct(turnover) if turnover is not None else "—",
-            "help": "(NEW + SOLD) / total positions",
+            "label": "New + Sold Ratio",
+            "value": format_pct(new_sold_ratio) if new_sold_ratio is not None else "—",
+            "help": "(NEW + SOLD) / current position count — not full turnover",
         },
     ]
     render_kpi_cards(metrics)

@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import pandas as pd
 import streamlit as st
+from sqlalchemy import text
 
 from dashboard.data_access import get_crowding_df
+from dashboard.utils.formatters import display_label
+from db.engine import engine
+from utils import get_prev_quarter, quarter_to_dates
 
 
 def render_crowding_view(quarter: str) -> None:
@@ -33,8 +37,8 @@ def render_crowding_view(quarter: str) -> None:
 
     st.markdown("---")
 
-    # 上升/下降最快
-    _render_movers(df)
+    # 真实环比变化：本季 NEW 净流入 vs SOLD 净流出
+    _render_movers(quarter)
 
 
 def _render_all_sectors(df: pd.DataFrame) -> None:
@@ -85,26 +89,105 @@ def _render_by_sector(df: pd.DataFrame) -> None:
             )
 
 
-def _render_movers(df: pd.DataFrame) -> None:
-    """上升/下降最快."""
+def _get_holder_count_changes(quarter: str) -> pd.DataFrame:
+    """计算本季 vs 上季各 ticker 的持有基金数变化（NEW - SOLD）。
+
+    Returns:
+        DataFrame: ticker, name, sector, new_count, sold_count, net_change
+    """
+    prev_q = get_prev_quarter(quarter)
+    _, curr_end = quarter_to_dates(quarter)
+    _, prev_end = quarter_to_dates(prev_q)
+    curr_rd = curr_end.isoformat()
+    prev_rd = prev_end.isoformat()
+
+    query = """
+    WITH curr_holders AS (
+        SELECT ticker, MAX(name) as name, COUNT(DISTINCT fund_id) as curr_count
+        FROM holdings
+        WHERE report_date = :curr_rd
+          AND (put_call IS NULL OR put_call = '' OR put_call = 'NONE')
+          AND ticker IS NOT NULL
+        GROUP BY ticker
+    ),
+    prev_holders AS (
+        SELECT ticker, COUNT(DISTINCT fund_id) as prev_count
+        FROM holdings
+        WHERE report_date = :prev_rd
+          AND (put_call IS NULL OR put_call = '' OR put_call = 'NONE')
+          AND ticker IS NOT NULL
+        GROUP BY ticker
+    ),
+    sector_map AS (
+        SELECT ticker, MAX(sector) as sector
+        FROM securities
+        WHERE ticker IS NOT NULL AND sector IS NOT NULL
+        GROUP BY ticker
+    )
+    SELECT
+        c.ticker,
+        c.name,
+        COALESCE(s.sector, 'Unknown') as sector,
+        COALESCE(p.prev_count, 0) as prev_count,
+        c.curr_count,
+        (c.curr_count - COALESCE(p.prev_count, 0)) as net_change
+    FROM curr_holders c
+    LEFT JOIN prev_holders p ON c.ticker = p.ticker
+    LEFT JOIN sector_map s ON s.ticker = c.ticker
+    ORDER BY net_change DESC
+    """
+    with engine.connect() as conn:
+        return pd.read_sql(
+            text(query), conn,
+            params={"curr_rd": curr_rd, "prev_rd": prev_rd},
+        )
+
+
+def _render_movers(quarter: str) -> None:
+    """本季持有人数上升/下降最快的股票（基于环比变化）。"""
+    st.subheader("Quarter-over-Quarter Holder Count Change")
+
+    changes = _get_holder_count_changes(quarter)
+    if changes.empty:
+        st.info("No QoQ change data available (need at least 2 quarters of data).")
+        return
+
+    rising = changes[changes["net_change"] > 0].head(10)
+    falling = changes[changes["net_change"] < 0].sort_values("net_change").head(10)
+
     col1, col2 = st.columns(2)
     with col1:
-        st.subheader("🔥 Rising Fast")
-        # 由于我们没有环比数据，用 holder_count 作为替代排序
-        rising = df.head(10).copy()
-        if not rising.empty:
-            st.dataframe(
-                rising[["ticker", "name", "sector", "holder_count", "crowding_score"]],
-                use_container_width=True,
-                hide_index=True,
+        st.markdown(f"**🔥 Rising — {len(rising)} stocks with net new holders**")
+        if rising.empty:
+            st.caption("No stocks gained holders this quarter.")
+        else:
+            disp = rising.copy()
+            disp["Display"] = disp.apply(
+                lambda r: display_label(r.get("ticker"), r.get("name")), axis=1
             )
-    with col2:
-        st.subheader("❄️ Falling Fast")
-        # 反转排序取尾部
-        falling = df.tail(10).copy()
-        if not falling.empty:
             st.dataframe(
-                falling[["ticker", "name", "sector", "holder_count", "crowding_score"]],
+                disp[["Display", "sector", "prev_count", "curr_count", "net_change"]],
                 use_container_width=True,
                 hide_index=True,
+                column_config={
+                    "net_change": st.column_config.NumberColumn("Net Δ", format="+%d"),
+                },
+            )
+
+    with col2:
+        st.markdown(f"**❄️ Falling — {len(falling)} stocks with net lost holders**")
+        if falling.empty:
+            st.caption("No stocks lost holders this quarter.")
+        else:
+            disp = falling.copy()
+            disp["Display"] = disp.apply(
+                lambda r: display_label(r.get("ticker"), r.get("name")), axis=1
+            )
+            st.dataframe(
+                disp[["Display", "sector", "prev_count", "curr_count", "net_change"]],
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "net_change": st.column_config.NumberColumn("Net Δ", format="+%d"),
+                },
             )

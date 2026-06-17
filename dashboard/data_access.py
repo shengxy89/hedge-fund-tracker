@@ -40,6 +40,7 @@ def get_available_quarters() -> list[str]:
     return quarters
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
 def get_funds_df() -> pd.DataFrame:
     """获取基金列表"""
     query = "SELECT fund_id, cik, name, manager, strategy FROM funds WHERE is_active = 1 ORDER BY name"
@@ -47,51 +48,59 @@ def get_funds_df() -> pd.DataFrame:
         return pd.read_sql(query, conn)
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
 def get_summary_metrics(quarter: str) -> dict:
-    """获取顶部指标卡数据"""
+    """获取顶部指标卡数据（单连接多查询，避免反复建连）"""
     _, end_date = quarter_to_dates(quarter)
     report_date = end_date.isoformat()
 
-    # 追踪基金数
     with engine.connect() as conn:
+        # 追踪基金数（当季有持仓）
         total_funds = conn.execute(
             text("SELECT COUNT(DISTINCT fund_id) FROM holdings WHERE report_date = :rd"),
             {"rd": report_date},
         ).scalar() or 0
 
-    # 当前季度总持仓股票数（去重）
-    with engine.connect() as conn:
-        total_stocks = conn.execute(text(
-            "SELECT COUNT(DISTINCT ticker) FROM holdings WHERE report_date = :rd AND ticker IS NOT NULL"
-        ), {"rd": report_date}).scalar() or 0
+        # 当前季度总持仓股票数（去重）
+        total_stocks = conn.execute(
+            text(
+                "SELECT COUNT(DISTINCT ticker) FROM holdings "
+                "WHERE report_date = :rd AND ticker IS NOT NULL"
+            ),
+            {"rd": report_date},
+        ).scalar() or 0
 
-    # 最活跃调仓基金
-    with engine.connect() as conn:
-        result = conn.execute(text("""
-            SELECT fund_id, COUNT(*) as cnt FROM holding_deltas
-            WHERE quarter = :q AND action IN ('NEW', 'SOLD')
-            GROUP BY fund_id ORDER BY cnt DESC LIMIT 1
-        """), {"q": quarter})
-        row = result.fetchone()
-        active_fund_id = row[0] if row else None
-        active_count = row[1] if row else 0
+        # 最活跃调仓基金（一次 JOIN 取基金名）
+        result = conn.execute(
+            text("""
+                SELECT d.fund_id, f.name, COUNT(*) as cnt
+                FROM holding_deltas d
+                JOIN funds f ON d.fund_id = f.fund_id
+                WHERE d.quarter = :q AND d.action IN ('NEW', 'SOLD')
+                GROUP BY d.fund_id, f.name
+                ORDER BY cnt DESC
+                LIMIT 1
+            """),
+            {"q": quarter},
+        ).fetchone()
+        active_fund_name = result[1] if result else ""
+        active_count = result[2] if result else 0
 
-    active_fund_name = ""
-    if active_fund_id:
-        with engine.connect() as conn:
-            name = conn.execute(text("SELECT name FROM funds WHERE fund_id = :fid"), {"fid": active_fund_id}).scalar()
-            active_fund_name = name or ""
-
-    # 最拥挤股票 Top 1
-    with engine.connect() as conn:
-        result = conn.execute(text("""
-            SELECT ticker, COUNT(DISTINCT fund_id) as cnt FROM holdings
-            WHERE report_date = :rd AND ticker IS NOT NULL AND (put_call IS NULL OR put_call = '')
-            GROUP BY ticker ORDER BY cnt DESC LIMIT 1
-        """), {"rd": report_date})
-        row = result.fetchone()
-        crowded_ticker = row[0] if row else ""
-        crowded_count = row[1] if row else 0
+        # 最拥挤股票 Top 1
+        result = conn.execute(
+            text("""
+                SELECT ticker, COUNT(DISTINCT fund_id) as cnt
+                FROM holdings
+                WHERE report_date = :rd AND ticker IS NOT NULL
+                  AND (put_call IS NULL OR put_call = '')
+                GROUP BY ticker
+                ORDER BY cnt DESC
+                LIMIT 1
+            """),
+            {"rd": report_date},
+        ).fetchone()
+        crowded_ticker = result[0] if result else ""
+        crowded_count = result[1] if result else 0
 
     return {
         "total_funds": int(total_funds),
@@ -103,7 +112,8 @@ def get_summary_metrics(quarter: str) -> dict:
     }
 
 
-def get_heatmap_data(quarter: str, min_holders: int = 3, selected_sectors: list = None) -> pd.DataFrame:
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_heatmap_data(quarter: str, min_holders: int = 3, selected_sectors: list | None = None) -> pd.DataFrame:
     """
     获取热力图数据
     返回 DataFrame: fund_name x ticker -> action_code
@@ -153,6 +163,7 @@ def get_heatmap_data(quarter: str, min_holders: int = 3, selected_sectors: list 
     return df
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
 def get_fund_holdings(fund_id: int, quarter: str) -> pd.DataFrame:
     """获取某基金某季度的持仓明细"""
     _, end_date = quarter_to_dates(quarter)
@@ -181,6 +192,7 @@ def get_fund_holdings(fund_id: int, quarter: str) -> pd.DataFrame:
         return pd.read_sql(query, conn, params={"fund_id": fund_id, "quarter": quarter, "report_date": report_date})
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
 def get_fund_deltas(fund_id: int, quarter: str) -> pd.DataFrame:
     """获取某基金某季度的调仓变化"""
     query = """
@@ -192,6 +204,7 @@ def get_fund_deltas(fund_id: int, quarter: str) -> pd.DataFrame:
         return pd.read_sql(query, conn, params={"fund_id": fund_id, "quarter": quarter})
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
 def get_stock_holders(ticker: str, quarter: str) -> pd.DataFrame:
     """获取持有某股票的所有基金"""
     _, end_date = quarter_to_dates(quarter)
@@ -226,6 +239,7 @@ def get_stock_holders(ticker: str, quarter: str) -> pd.DataFrame:
         return pd.read_sql(query, conn, params={"ticker": ticker, "quarter": quarter, "report_date": report_date})
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
 def get_stock_history(ticker: str) -> pd.DataFrame:
     """获取某股票的历史持仓（各基金 shares 堆叠）"""
     query = """
@@ -242,6 +256,7 @@ def get_stock_history(ticker: str) -> pd.DataFrame:
         return pd.read_sql(query, conn, params={"ticker": ticker})
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
 def get_sector_weights_fund(fund_id: int, quarter: str) -> pd.DataFrame:
     """获取某基金某季度的板块权重"""
     query = """
@@ -254,6 +269,7 @@ def get_sector_weights_fund(fund_id: int, quarter: str) -> pd.DataFrame:
         return pd.read_sql(query, conn, params={"fund_id": fund_id, "quarter": quarter})
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
 def get_crowding_df(quarter: str) -> pd.DataFrame:
     """获取拥挤度排行"""
     from analytics.crowding import get_crowding_report
@@ -261,6 +277,7 @@ def get_crowding_df(quarter: str) -> pd.DataFrame:
     return df.to_pandas()
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
 def get_sector_weight_heatmap(quarter: str) -> pd.DataFrame:
     """
     获取板块权重热力图数据
@@ -281,6 +298,7 @@ def get_sector_weight_heatmap(quarter: str) -> pd.DataFrame:
     return df
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
 def get_stock_jaccard_overlaps(ticker: str, quarter: str) -> pd.DataFrame:
     """
     获取持有某股票的所有基金之间的 Jaccard 趋同度
@@ -313,6 +331,7 @@ def get_stock_jaccard_overlaps(ticker: str, quarter: str) -> pd.DataFrame:
         return pd.read_sql(query, conn, params={"ticker": ticker, "quarter": quarter, "report_date": report_date})
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
 def get_stock_info(ticker: str) -> dict:
     """获取股票基本信息"""
     query = "SELECT ticker, name, sector, industry FROM securities WHERE ticker = :ticker LIMIT 1"
@@ -329,6 +348,7 @@ def get_stock_info(ticker: str) -> dict:
     }
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
 def get_filing_info(fund_id: int, quarter: str) -> dict:
     """获取某基金某季度的 filing 信息（report_date vs filing_date）"""
     _, end_date = quarter_to_dates(quarter)
