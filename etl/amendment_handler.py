@@ -1,8 +1,8 @@
 """
 Amendment 去重处理模块
 """
-from datetime import datetime
 from collections import defaultdict
+
 from loguru import logger
 
 
@@ -37,7 +37,10 @@ def deduplicate_filings(filings: list[dict]) -> list[dict]:
             # 保留 filing_date 最新的 amendment
             amendments.sort(key=lambda x: x.get("filing_date", ""), reverse=True)
             chosen = amendments[0]
-            logger.info(f"Report date {rd}: using amendment {chosen['accession_number']} over {len(originals)} original(s)")
+            logger.info(
+                f"Report date {rd}: using amendment {chosen['accession_number']} "
+                f"over {len(originals)} original(s)"
+            )
         elif originals:
             chosen = originals[0]
         else:

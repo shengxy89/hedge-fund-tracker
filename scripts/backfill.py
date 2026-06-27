@@ -3,18 +3,16 @@
 历史数据回填脚本
 支持真实 API 抓取和模拟数据两种模式
 """
-import sys
 import asyncio
+import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from loguru import logger
 
-from db.engine import get_session
-from db.models import Fund
-from etl.pipeline import run_etl_pipeline
 from etl.mock_data import seed_mock_data
+from etl.pipeline import run_etl_pipeline
 
 
 def backfill(quarters: int = 8, use_mock: bool = False):

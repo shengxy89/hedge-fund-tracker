@@ -1,11 +1,23 @@
 """多基金调仓共识信号引擎
 
-核心思路：weight_change_pct（权重变化百分比）作为跨基金可比指标，
-聚合多基金对同一标的的共识调仓信号。
+核心思路：weight_change_pct（权重变化百分比）和 value_change（绝对金额变化）
+作为跨基金可比指标，聚合多基金对同一标的的共识调仓信号。
+
+signal_score 公式：
+    signal_score =
+        fund_count * abs(avg_weight_change_pct)
+        + log10(1 + abs(total_value_change)) * 2
+        + holder_count * 0.5
+
+解释：
+- fund_count * abs(avg_weight_change_pct)：比例反映 conviction（信念强度）
+- log10(1 + abs(total_value_change)) * 2：绝对金额反映实际资本流向
+- holder_count * 0.5：反映拥挤度/共识范围
 """
 from __future__ import annotations
 
 import polars as pl
+from sqlalchemy import text
 
 from db.engine import get_session
 from utils import quarter_to_dates
@@ -15,13 +27,25 @@ from utils import quarter_to_dates
 # ──────────────────────────────
 
 
+def _resolve_consensus_quarter(quarter: str | None) -> str | None:
+    """解析 consensus 目标季度。若传入 None，返回 holding_deltas 中最新的季度。"""
+    if quarter:
+        return quarter
+    with get_session(read_only=True) as session:
+        result = session.execute(
+            text("SELECT DISTINCT quarter FROM holding_deltas ORDER BY quarter")
+        )
+        quarters = [r[0] for r in result.fetchall()]
+        return quarters[-1] if quarters else None
+
+
 def _get_fund_size_tier(session, fund_ids: list[int] | None) -> dict[int, str]:
     """根据基金最新持仓总市值划分规模档次"""
-    from sqlalchemy import text
-
     fund_query = "SELECT fund_id, name FROM funds"
     if fund_ids:
-        fund_query += f" WHERE fund_id IN ({','.join(map(str, fund_ids))})"
+        # 显式转 int 后再拼接，避免字符串注入
+        safe_ids = ",".join(str(int(fid)) for fid in fund_ids)
+        fund_query += f" WHERE fund_id IN ({safe_ids})"
     result = session.execute(text(fund_query))
     funds = result.fetchall()
 
@@ -73,32 +97,26 @@ def compute_consensus(
     :param fund_ids: 限定基金范围
     :return: 共识信号 DataFrame
     """
-    from sqlalchemy import text
+    # 确定季度（提前固定，避免下游丢失）
+    actual_quarter = _resolve_consensus_quarter(quarter)
+    if actual_quarter is None:
+        return pl.DataFrame()
 
-    # 确定季度
-    with get_session(read_only=True) as session:
-        if quarter is None:
-            result = session.execute(text("SELECT DISTINCT quarter FROM holding_deltas ORDER BY quarter"))
-            quarters = [r[0] for r in result.fetchall()]
-            quarter = quarters[-1] if quarters else None
-        if quarter is None:
-            return pl.DataFrame()
-
-    # 直接从 holding_deltas 表读取
+    # 直接从 holding_deltas 表读取，包含金额和权重字段
     delta_sql = """
         SELECT d.fund_id, d.cusip, d.put_call, d.quarter,
                d.action, d.weight_change_pct,
+               d.value_change, d.value_curr, d.value_prev, d.value_change_pct,
+               d.weight_curr, d.weight_prev,
                s.name as issuer,
                s.sector, s.industry
         FROM holding_deltas d
         JOIN securities s ON d.cusip = s.cusip
         WHERE d.quarter = :quarter
     """
-    if fund_ids:
-        delta_sql += f" AND d.fund_id IN ({','.join(map(str, fund_ids))})"
 
     with get_session(read_only=True) as session:
-        result = session.execute(text(delta_sql), {"quarter": quarter})
+        result = session.execute(text(delta_sql), {"quarter": actual_quarter})
         rows = result.mappings().all()
 
     if not rows:
@@ -108,18 +126,28 @@ def compute_consensus(
     if delta_df.is_empty():
         return pl.DataFrame()
 
+    # 若限定 fund_ids，在 Python 层过滤（避免 SQL 拼接风险）
+    if fund_ids:
+        safe_fund_ids = [int(fid) for fid in fund_ids]
+        delta_df = delta_df.filter(pl.col("fund_id").is_in(safe_fund_ids))
+        if delta_df.is_empty():
+            return pl.DataFrame()
+
     # ── 获取当前季度各标的的 holder_count（拥挤度）──
-    _, end_date = quarter_to_dates(quarter)
-    report_date = end_date.isoformat()
+    # 使用日期范围查询，避免只依赖季度最后一天
+    start_date, end_date = quarter_to_dates(actual_quarter)
     crowding_sql = """
         SELECT cusip, COUNT(DISTINCT fund_id) as holder_count
         FROM holdings
-        WHERE report_date = :report_date
+        WHERE report_date >= :start_date AND report_date <= :end_date
           AND (put_call IS NULL OR put_call = '' OR put_call = 'NONE')
         GROUP BY cusip
     """
     with get_session(read_only=True) as session:
-        result = session.execute(text(crowding_sql), {"report_date": report_date})
+        result = session.execute(
+            text(crowding_sql),
+            {"start_date": start_date.isoformat(), "end_date": end_date.isoformat()},
+        )
         crowding_rows = result.mappings().all()
 
     crowding_df = pl.DataFrame([dict(r) for r in crowding_rows])
@@ -133,71 +161,73 @@ def compute_consensus(
         pl.col("put_call").fill_null("NONE")
     )
 
-    # 分类：NEW / SOLD 为方向性动作；ADD / REDUCE 为同方向共识
-    # 1) 共识 NEW: ≥N 家基金同时新建仓（weight_change_pct = weight_curr）
+    # 辅助聚合表达式（避免重复）
+    base_aggs = [
+        pl.len().alias("fund_count"),
+        pl.mean("weight_change_pct").alias("avg_weight_change_pct"),
+        pl.sum("weight_change_pct").alias("total_weight_change_pct"),
+        pl.sum("value_change").alias("total_value_change"),
+        pl.mean("value_change").alias("avg_value_change"),
+        pl.col("value_change").abs().sum().alias("total_abs_value_change"),
+        pl.mean("value_change_pct").alias("avg_value_change_pct"),
+        pl.mean("weight_curr").alias("avg_weight_curr"),
+        pl.sum("weight_curr").alias("total_weight_curr"),
+        pl.col("fund_id").alias("fund_ids"),
+        pl.max("holder_count").alias("holder_count"),
+    ]
+
+    # 1) 共识 NEW: ≥N 家基金同时新建仓
     consensus_new = (
         delta_df.filter(pl.col("action") == "NEW")
         .group_by(["cusip", "put_call", "issuer", "sector", "industry"])
-        .agg([
-            pl.len().alias("fund_count"),
-            pl.mean("weight_change_pct").alias("avg_weight_change_pct"),
-            pl.sum("weight_change_pct").alias("total_weight_change_pct"),
-            pl.col("fund_id").alias("fund_ids"),
-            pl.max("holder_count").alias("holder_count"),
-        ])
+        .agg(base_aggs)
         .filter(pl.col("fund_count") >= min_funds)
-        .with_columns(pl.lit("NEW").alias("consensus_action"))
+        .with_columns([
+            pl.lit("NEW").alias("consensus_action"),
+            pl.lit(actual_quarter).alias("quarter"),
+        ])
     )
 
-    # 2) 共识 SOLD: ≥N 家基金同时清仓（weight_change_pct = -weight_prev）
+    # 2) 共识 SOLD: ≥N 家基金同时清仓
     consensus_sold = (
         delta_df.filter(pl.col("action") == "SOLD")
         .group_by(["cusip", "put_call", "issuer", "sector", "industry"])
-        .agg([
-            pl.len().alias("fund_count"),
-            pl.mean("weight_change_pct").alias("avg_weight_change_pct"),
-            pl.sum("weight_change_pct").alias("total_weight_change_pct"),
-            pl.col("fund_id").alias("fund_ids"),
-            pl.max("holder_count").alias("holder_count"),
-        ])
+        .agg(base_aggs)
         .filter(pl.col("fund_count") >= min_funds)
-        .with_columns(pl.lit("SOLD").alias("consensus_action"))
+        .with_columns([
+            pl.lit("SOLD").alias("consensus_action"),
+            pl.lit(actual_quarter).alias("quarter"),
+        ])
     )
 
     # 3) 共识 ADD: ≥N 家基金同时增持，且平均 weight_change_pct > 阈值
     consensus_add = (
         delta_df.filter(pl.col("action") == "ADD")
         .group_by(["cusip", "put_call", "issuer", "sector", "industry"])
-        .agg([
-            pl.len().alias("fund_count"),
-            pl.mean("weight_change_pct").alias("avg_weight_change_pct"),
-            pl.sum("weight_change_pct").alias("total_weight_change_pct"),
-            pl.col("fund_id").alias("fund_ids"),
-            pl.max("holder_count").alias("holder_count"),
-        ])
+        .agg(base_aggs)
         .filter(
             (pl.col("fund_count") >= min_funds)
             & (pl.col("avg_weight_change_pct") >= add_reduce_threshold)
         )
-        .with_columns(pl.lit("ADD").alias("consensus_action"))
+        .with_columns([
+            pl.lit("ADD").alias("consensus_action"),
+            pl.lit(actual_quarter).alias("quarter"),
+        ])
     )
 
     # 4) 共识 REDUCE: ≥N 家基金同时减持，且平均 weight_change_pct < -阈值
     consensus_reduce = (
         delta_df.filter(pl.col("action") == "REDUCE")
         .group_by(["cusip", "put_call", "issuer", "sector", "industry"])
-        .agg([
-            pl.len().alias("fund_count"),
-            pl.mean("weight_change_pct").alias("avg_weight_change_pct"),
-            pl.sum("weight_change_pct").alias("total_weight_change_pct"),
-            pl.col("fund_id").alias("fund_ids"),
-            pl.max("holder_count").alias("holder_count"),
-        ])
+        .agg(base_aggs)
         .filter(
             (pl.col("fund_count") >= min_funds)
             & (pl.col("avg_weight_change_pct") <= -add_reduce_threshold)
         )
-        .with_columns(pl.lit("REDUCE").alias("consensus_action"))
+        .with_columns([
+            pl.lit("REDUCE").alias("consensus_action"),
+            pl.lit(actual_quarter).alias("quarter"),
+        ])
     )
 
     # 合并所有共识信号
@@ -209,9 +239,14 @@ def compute_consensus(
     if consensus.is_empty():
         return consensus
 
-    # 计算信号强度 score = fund_count * abs(avg_weight_change_pct)
+    # 计算信号强度 score
+    # 比例反映 conviction，绝对金额反映实际资本流向，holder_count 反映拥挤度/共识范围
     consensus = consensus.with_columns(
-        (pl.col("fund_count") * pl.col("avg_weight_change_pct").abs()).alias("signal_score")
+        (
+            pl.col("fund_count") * pl.col("avg_weight_change_pct").abs()
+            + (1 + pl.col("total_value_change").abs()).log10() * 2
+            + pl.col("holder_count").fill_null(0) * 0.5
+        ).alias("signal_score")
     )
 
     # 获取总基金数计算 crowding_score
@@ -245,7 +280,16 @@ def write_consensus_to_db(
     """
     from db.models import HoldingDeltaNorm
 
-    consensus_df = compute_consensus(quarter=quarter, min_funds=min_funds, add_reduce_threshold=add_reduce_threshold)
+    # 提前解析季度，不依赖 consensus_df 中的字段
+    actual_quarter = _resolve_consensus_quarter(quarter)
+    if actual_quarter is None:
+        return 0
+
+    consensus_df = compute_consensus(
+        quarter=actual_quarter,
+        min_funds=min_funds,
+        add_reduce_threshold=add_reduce_threshold,
+    )
 
     if consensus_df.is_empty():
         return 0
@@ -280,19 +324,25 @@ def write_consensus_to_db(
 
         records.append(
             {
-                "quarter": quarter or row.get("quarter", ""),
+                "quarter": actual_quarter,
                 "cusip": row["cusip"],
                 "put_call": None if row["put_call"] == "NONE" else row["put_call"],
                 "consensus_action": action,
                 "fund_count": row["fund_count"],
                 "avg_weight_change_pct": round(row["avg_weight_change_pct"], 4),
-                "total_weight_change_pct": round(row["total_weight_change_pct"], 4),
+                "total_weight_change_pct": round(row.get("total_weight_change_pct", 0) or 0, 4),
                 "signal_score": round(row["signal_score"], 4),
                 "fund_size_tier": fund_size_tier,
                 "action_norm_score": round(action_norm_score, 4),
                 "conviction_score": round(conviction_score, 4),
                 "holder_count": int(row.get("holder_count", 0) or 0),
                 "crowding_score": round(row.get("crowding_score", 0) or 0, 4),
+                "total_value_change": int(row.get("total_value_change", 0) or 0),
+                "avg_value_change": round(row.get("avg_value_change", 0) or 0, 4),
+                "total_abs_value_change": int(row.get("total_abs_value_change", 0) or 0),
+                "avg_value_change_pct": round(row.get("avg_value_change_pct", 0) or 0, 4),
+                "avg_weight_curr": round(row.get("avg_weight_curr", 0) or 0, 4),
+                "total_weight_curr": round(row.get("total_weight_curr", 0) or 0, 4),
             }
         )
 
@@ -301,10 +351,9 @@ def write_consensus_to_db(
 
     with get_session() as session:
         # 先清空该季度的旧数据
-        from sqlalchemy import text
-
-        q = quarter or records[0]["quarter"]
-        session.execute(text("DELETE FROM holding_delta_norms WHERE quarter = :q"), {"q": q})
+        session.execute(
+            text("DELETE FROM holding_delta_norms WHERE quarter = :q"), {"q": actual_quarter}
+        )
         session.commit()
 
         for rec in records:

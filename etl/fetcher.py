@@ -3,16 +3,13 @@
 支持 forms13f.com API 和 SEC EDGAR 双数据源
 """
 import asyncio
-import json
-from datetime import date, timedelta
-from typing import Optional
 
 import httpx
-from tenacity import retry, stop_after_attempt, wait_exponential
 from loguru import logger
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 from config.settings import get_settings
-from utils import pad_cik, date_to_quarter
+from utils import pad_cik
 
 settings = get_settings()
 
@@ -21,7 +18,7 @@ class RateLimiter:
     """异步速率限制器（协程安全）"""
     def __init__(self, delay_sec: float):
         self.delay = delay_sec
-        self._last_call: Optional[float] = None
+        self._last_call: float | None = None
         self._lock = asyncio.Lock()
 
     async def acquire(self):
@@ -38,7 +35,7 @@ rate_limiter = RateLimiter(settings.rate_limit_delay)
 
 
 @retry(stop=stop_after_attempt(settings.max_retries), wait=wait_exponential(multiplier=1, min=1, max=10))
-async def _get(url: str, headers: Optional[dict] = None, client: Optional[httpx.AsyncClient] = None) -> dict:
+async def _get(url: str, headers: dict | None = None, client: httpx.AsyncClient | None = None) -> dict:
     """带重试的 GET 请求"""
     await rate_limiter.acquire()
     default_headers = {
@@ -64,7 +61,7 @@ async def _get(url: str, headers: Optional[dict] = None, client: Optional[httpx.
             await c.aclose()
 
 
-async def fetch_filings_sec(cik: str, quarters: int = 8, client: Optional[httpx.AsyncClient] = None) -> list[dict]:
+async def fetch_filings_sec(cik: str, quarters: int = 8, client: httpx.AsyncClient | None = None) -> list[dict]:
     """
     从 SEC EDGAR 获取 filings 列表（备用数据源）
     https://efts.sec.gov/LATEST/submissions/CIK{cik_padded}.json
@@ -118,7 +115,7 @@ async def _try_fetch_xml(client: httpx.AsyncClient, url: str) -> str:
     )
 
 
-async def fetch_holdings_sec(cik: str, accession_number: str, client: Optional[httpx.AsyncClient] = None) -> list[dict]:
+async def fetch_holdings_sec(cik: str, accession_number: str, client: httpx.AsyncClient | None = None) -> list[dict]:
     """
     从 SEC EDGAR XML 获取持仓明细
     SEC 13F 的 holdings 通常位于 submission 目录下的某个 XML 文件中
@@ -199,7 +196,7 @@ async def fetch_fund_data(cik: str, quarters: int = 8) -> dict:
     返回: {
         "cik": str,
         "filings": list[dict],
-        "holdings": dict[report_date, list[dict]],
+        "holdings": dict[accession_number, list[dict]],
         "source": "sec"
     }
     """
@@ -215,7 +212,7 @@ async def fetch_fund_data(cik: str, quarters: int = 8) -> dict:
                 continue
             h = await fetch_holdings_sec(cik, acc, client=client)
             if h:
-                holdings_map[r_date] = h
+                holdings_map[acc] = h
 
         return {
             "cik": cik,

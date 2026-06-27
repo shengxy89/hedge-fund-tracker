@@ -68,14 +68,13 @@ def get_fund_quarters(fund_id: int) -> list[str]:
     return [date_to_quarter(d) for d in dates]
 
 
-def compute_deltas_for_fund(fund_id: int, curr_date: date, prev_date: date) -> pl.DataFrame:
+def compute_deltas_from_frames(
+    curr: pl.DataFrame, prev: pl.DataFrame, fund_id: int, curr_date: date, prev_date: date
+) -> pl.DataFrame:
     """
-    计算单个基金从 prev_date 到 curr_date 的调仓变化
+    纯函数：计算单个基金从 prev_date 到 curr_date 的调仓变化
     返回 HoldingDelta 格式的 DataFrame
     """
-    curr = get_holdings_df(fund_id, curr_date)
-    prev = get_holdings_df(fund_id, prev_date)
-
     if curr.is_empty() and prev.is_empty():
         return pl.DataFrame()
 
@@ -133,6 +132,14 @@ def compute_deltas_for_fund(fund_id: int, curr_date: date, prev_date: date) -> p
         )
         .alias("shares_change_pct"),
         (pl.col("weight_pct") - pl.col("weight_pct_prev")).alias("weight_change_pct"),
+        pl.when(pl.col("value_prev") > 0)
+        .then(pl.col("value_change") / pl.col("value_prev") * 100)
+        .otherwise(
+            pl.when(pl.col("action") == "NEW").then(pl.lit(100.0))
+            .when(pl.col("action") == "SOLD").then(pl.lit(-100.0))
+            .otherwise(None)
+        )
+        .alias("value_change_pct"),
     ])
 
     # 过滤掉 HOLD 和 cusip 为空的
@@ -158,12 +165,23 @@ def compute_deltas_for_fund(fund_id: int, curr_date: date, prev_date: date) -> p
         pl.col("value_prev"),
         pl.col("value").alias("value_curr"),
         pl.col("value_change"),
+        pl.col("value_change_pct"),
         pl.col("weight_pct_prev").alias("weight_prev"),
         pl.col("weight_pct").alias("weight_curr"),
         pl.col("weight_change_pct"),
     ])
 
     return result
+
+
+def compute_deltas_for_fund(fund_id: int, curr_date: date, prev_date: date) -> pl.DataFrame:
+    """
+    计算单个基金从 prev_date 到 curr_date 的调仓变化
+    返回 HoldingDelta 格式的 DataFrame
+    """
+    curr = get_holdings_df(fund_id, curr_date)
+    prev = get_holdings_df(fund_id, prev_date)
+    return compute_deltas_from_frames(curr, prev, fund_id, curr_date, prev_date)
 
 
 def run_delta_engine(fund_ids: list[int] | None = None):
@@ -216,7 +234,7 @@ def run_delta_engine(fund_ids: list[int] | None = None):
 
     combined = pl.concat(all_deltas)
 
-    # 增量替换：仅删除本次计算涉及的 quarter（而非全表 TRUNCATE）
+    # 写入数据库（仅删除本次涉及的季度，避免全表清空）
     quarters_touched = sorted({q for q in combined["quarter"].to_list() if q})
     with engine.connect() as conn:
         if quarters_touched:
@@ -229,8 +247,5 @@ def run_delta_engine(fund_ids: list[int] | None = None):
     pd_df = combined.to_pandas()
     pd_df.to_sql("holding_deltas", engine, if_exists="append", index=False)
 
-    logger.info(
-        f"[OK] Delta engine complete. {len(pd_df)} delta records computed "
-        f"for quarters {quarters_touched}."
-    )
+    logger.info(f"[OK] Delta engine complete. {len(pd_df)} delta records computed.")
     return len(pd_df)

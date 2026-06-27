@@ -1,13 +1,12 @@
 """
 市场拥挤度计算
 """
-from typing import Optional
 
 import polars as pl
 from sqlalchemy import text
 
 from db.engine import engine
-from utils import date_to_quarter, quarter_to_dates
+from utils import quarter_to_dates
 
 
 def get_crowding_report(quarter: str, min_holders: int = 2) -> pl.DataFrame:
@@ -17,11 +16,10 @@ def get_crowding_report(quarter: str, min_holders: int = 2) -> pl.DataFrame:
     :param min_holders: 最少持有基金数阈值
     :return: Polars DataFrame
     """
-    _, end_date = quarter_to_dates(quarter)
-    report_date = end_date.isoformat()
+    start_date, end_date = quarter_to_dates(quarter)
 
     query = """
-    SELECT 
+    SELECT
         h.ticker,
         MAX(h.name) as name,
         MAX(COALESCE(s.sector, 'Unknown')) as sector,
@@ -30,7 +28,7 @@ def get_crowding_report(quarter: str, min_holders: int = 2) -> pl.DataFrame:
         SUM(h.value) as total_value
     FROM holdings h
     LEFT JOIN securities s ON h.cusip = s.cusip
-    WHERE h.report_date = :report_date
+    WHERE h.report_date >= :start_date AND h.report_date <= :end_date
     AND (h.put_call IS NULL OR h.put_call = '')
     AND h.ticker IS NOT NULL
     GROUP BY h.ticker
@@ -39,7 +37,15 @@ def get_crowding_report(quarter: str, min_holders: int = 2) -> pl.DataFrame:
     """
 
     with engine.connect() as conn:
-        df = pl.read_database(query, conn, execute_options={"parameters": {"report_date": report_date, "min_holders": min_holders}})
+        df = pl.read_database(
+            query,
+            conn,
+            execute_options={"parameters": {
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+                "min_holders": min_holders,
+            }},
+        )
 
     if df.is_empty():
         return df

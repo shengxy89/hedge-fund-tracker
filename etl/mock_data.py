@@ -4,12 +4,12 @@
 """
 import random
 from datetime import date
+
 from loguru import logger
 
 from db.engine import get_session
-from db.models import Fund, Filing, Holding, Security
+from db.models import Filing, Fund, Holding, Security
 from etl.stock_map import MOCK_STOCKS
-from utils import date_to_quarter
 
 # 模拟股票池 (CUSIP, Ticker, Name, GICS Sector) — 来自 etl/stock_map 统一映射
 

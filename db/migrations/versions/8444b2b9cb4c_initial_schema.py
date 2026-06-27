@@ -1,21 +1,20 @@
 """initial schema
 
 Revision ID: 8444b2b9cb4c
-Revises: 
+Revises:
 Create Date: 2026-06-17 20:29:15.870650
 
 """
-from typing import Sequence, Union
+from collections.abc import Sequence
 
-from alembic import op
 import sqlalchemy as sa
-
+from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = '8444b2b9cb4c'
-down_revision: Union[str, Sequence[str], None] = None
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
+down_revision: str | Sequence[str] | None = None
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
@@ -26,7 +25,10 @@ def upgrade() -> None:
     sa.Column('cik', sa.String(length=20), nullable=False, comment='SEC CIK 编号'),
     sa.Column('name', sa.String(length=255), nullable=False, comment='基金公司名称'),
     sa.Column('manager', sa.String(length=255), nullable=True, comment='基金经理'),
-    sa.Column('strategy', sa.String(length=100), nullable=True, comment='投资策略分类: Growth/Value/Event-Driven/Multi-Strategy 等'),
+    sa.Column(
+        'strategy', sa.String(length=100), nullable=True,
+        comment='投资策略分类: Growth/Value/Event-Driven/Multi-Strategy 等',
+    ),
     sa.Column('is_active', sa.Boolean(), nullable=True, comment='是否仍在追踪'),
     sa.Column('created_at', sa.DateTime(), nullable=True),
     sa.Column('updated_at', sa.DateTime(), nullable=True),

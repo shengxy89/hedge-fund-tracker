@@ -41,8 +41,9 @@ def db_session(engine_obj):
 def seeded_db(engine_obj):
     """Seed 3 funds, 4 securities, 2 quarters of holdings into a fresh DB."""
     from datetime import date
+
     from db.engine import SessionLocal
-    from db.models import Base, Fund, Security, Filing, Holding
+    from db.models import Base, Filing, Fund, Holding, Security
 
     # Reset tables (in-memory; we recreate for determinism)
     Base.metadata.drop_all(bind=engine_obj)

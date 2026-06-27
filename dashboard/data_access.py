@@ -102,6 +102,12 @@ def get_summary_metrics(quarter: str) -> dict:
         crowded_ticker = result[0] if result else ""
         crowded_count = result[1] if result else 0
 
+        # 当前季度最晚 filing_date（数据延迟参考）
+        latest_filing_date = conn.execute(
+            text("SELECT MAX(filing_date) FROM filings WHERE report_date = :rd"),
+            {"rd": report_date},
+        ).scalar() or ""
+
     return {
         "total_funds": int(total_funds),
         "total_stocks": int(total_stocks),
@@ -109,6 +115,8 @@ def get_summary_metrics(quarter: str) -> dict:
         "active_count": int(active_count),
         "crowded_ticker": crowded_ticker,
         "crowded_count": int(crowded_count),
+        "report_date": report_date,
+        "latest_filing_date": str(latest_filing_date) if latest_filing_date else "",
     }
 
 
@@ -118,15 +126,10 @@ def get_heatmap_data(quarter: str, min_holders: int = 3, selected_sectors: list 
     获取热力图数据
     返回 DataFrame: fund_name x ticker -> action_code
     """
-    _, end_date = quarter_to_dates(quarter)
-    report_date = end_date.isoformat()
+    start_date, end_date = quarter_to_dates(quarter)
 
-    sector_filter = ""
-    if selected_sectors:
-        sectors_str = ", ".join([f"'{s}'" for s in selected_sectors])
-        sector_filter = f"AND COALESCE(s.sector, 'Unknown') IN ({sectors_str})"
-
-    query = f"""
+    # 参数化查询避免 SQL 拼接；sector 过滤在 DataFrame 后处理
+    query = """
     SELECT
         f.name as fund_name,
         h.ticker,
@@ -143,19 +146,31 @@ def get_heatmap_data(quarter: str, min_holders: int = 3, selected_sectors: list 
         AND h.cusip = d.cusip
         AND COALESCE(h.put_call, 'NONE') = COALESCE(d.put_call, 'NONE')
         AND d.quarter = :quarter
-    WHERE h.report_date = :report_date
-    {sector_filter}
+    WHERE h.report_date >= :start_date AND h.report_date <= :end_date
     AND h.ticker IN (
         SELECT ticker FROM holdings
-        WHERE report_date = :report_date
+        WHERE report_date >= :start_date AND report_date <= :end_date
         AND ticker IS NOT NULL
         GROUP BY ticker
-        HAVING COUNT(DISTINCT fund_id) >= {min_holders}
+        HAVING COUNT(DISTINCT fund_id) >= :min_holders
     )
     ORDER BY f.name, h.ticker
     """
     with engine.connect() as conn:
-        df = pd.read_sql(query, conn, params={"quarter": quarter, "report_date": report_date})
+        df = pd.read_sql(
+            text(query),
+            conn,
+            params={
+                "quarter": quarter,
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+                "min_holders": min_holders,
+            },
+        )
+
+    # 在 pandas 中过滤 sector，避免 SQL 拼接用户输入
+    if selected_sectors:
+        df = df[df["sector"].isin(selected_sectors + ["Unknown"])]
 
     # action -> numeric code
     action_map = {"NEW": 2, "ADD": 1, "HOLD": 0, "REDUCE": -1, "SOLD": -2}

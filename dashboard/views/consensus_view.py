@@ -16,6 +16,7 @@ from dashboard.utils.formatters import format_currency, format_pct, get_action_b
 def _get_total_active_funds() -> int:
     """查询当前追踪中的基金总数（动态获取，避免硬编码）"""
     from sqlalchemy import text
+
     from db.engine import engine
     with engine.connect() as conn:
         return int(conn.execute(text("SELECT COUNT(*) FROM funds WHERE is_active = 1")).scalar() or 1)

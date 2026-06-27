@@ -5,9 +5,7 @@ weights → consensus → dashboard data_access queries return expected results.
 """
 from __future__ import annotations
 
-import pandas as pd
 import polars as pl
-import pytest
 
 from tests.conftest import *  # noqa: F401,F403 — ensure env vars set before imports
 
@@ -18,8 +16,9 @@ def test_delta_engine_produces_expected_actions(seeded_db):
     count = run_delta_engine()
     assert count > 0
 
-    from db.engine import engine
     from sqlalchemy import text
+
+    from db.engine import engine
     with engine.connect() as conn:
         rows = conn.execute(text(
             "SELECT action, COUNT(*) FROM holding_deltas WHERE quarter = :q "
@@ -49,8 +48,9 @@ def test_sector_weights_computed(seeded_db):
     count = run_sector_weights(quarter=seeded_db["q_curr"])
     assert count > 0
 
-    from db.engine import engine
     from sqlalchemy import text
+
+    from db.engine import engine
     with engine.connect() as conn:
         sectors = conn.execute(text(
             "SELECT DISTINCT sector FROM sector_weights WHERE quarter = :q"
@@ -93,8 +93,9 @@ def test_data_access_summary_metrics(seeded_db):
 
     # data_access uses streamlit cache; bypass it by calling the underlying logic.
     # Use the engine directly to validate summary SQL.
-    from db.engine import engine
     from sqlalchemy import text
+
+    from db.engine import engine
     from utils import quarter_to_dates
 
     _, end_date = quarter_to_dates(seeded_db["q_curr"])
@@ -107,9 +108,10 @@ def test_data_access_summary_metrics(seeded_db):
 
 
 def test_incremental_delete_preserves_other_quarters(seeded_db):
+    from sqlalchemy import text
+
     from analytics.delta_engine import run_delta_engine
     from db.engine import engine
-    from sqlalchemy import text
 
     # First run: writes deltas for both 2024Q4 (curr vs prev) and possibly prev quarters.
     run_delta_engine()

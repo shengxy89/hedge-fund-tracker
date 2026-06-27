@@ -7,13 +7,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import config.logging  # noqa: F401
 from loguru import logger
 
-from db.models import Base
+import config.logging  # noqa: F401
 from db.engine import engine
-from scripts.seed_funds import seed_funds
+from db.models import Base
 from scripts.backfill import backfill
+from scripts.seed_funds import seed_funds
 
 
 def run_full_pipeline(mock: bool = False):

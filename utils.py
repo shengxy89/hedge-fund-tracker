@@ -1,5 +1,5 @@
-from datetime import date
 from calendar import monthrange
+from datetime import date
 
 
 def date_to_quarter(d: date) -> str:
@@ -32,3 +32,8 @@ def get_prev_quarter(quarter: str) -> str:
     if q == 1:
         return f"{year - 1}Q4"
     return f"{year}Q{q - 1}"
+
+
+def quarter_date_range(quarter: str) -> tuple[date, date]:
+    """返回季度的日期范围，等价于 quarter_to_dates"""
+    return quarter_to_dates(quarter)

@@ -3,7 +3,6 @@ CUSIP -> Ticker / Sector 解析模块
 支持批量查询以优化 OpenFIGI 速率限制
 """
 import asyncio
-from typing import Optional
 
 import httpx
 from loguru import logger
@@ -46,7 +45,7 @@ async def _openfigi_request(payload: list[dict]) -> list[dict]:
     return []
 
 
-async def resolve_from_openfigi(cusip: str) -> Optional[tuple[str, str]]:
+async def resolve_from_openfigi(cusip: str) -> tuple[str, str] | None:
     """使用 OpenFIGI API 解析单个 CUSIP -> (ticker, name)"""
     results = await resolve_from_openfigi_batch([cusip])
     return results.get(cusip)
@@ -83,7 +82,7 @@ async def resolve_from_openfigi_batch(cusips: list[str]) -> dict[str, tuple[str,
     return result
 
 
-async def resolve_from_fmp(ticker: str) -> Optional[tuple[str, str]]:
+async def resolve_from_fmp(ticker: str) -> tuple[str, str] | None:
     """使用 FMP API 获取 sector/industry"""
     if not settings.fmp_api_key:
         return None
@@ -101,7 +100,7 @@ async def resolve_from_fmp(ticker: str) -> Optional[tuple[str, str]]:
     return None
 
 
-def get_security_from_db(cusip: str) -> Optional[dict]:
+def get_security_from_db(cusip: str) -> dict | None:
     """查询本地 securities 表缓存，返回 plain dict（避免 DetachedInstanceError）"""
     with get_session(read_only=True) as session:
         sec = session.query(Security).filter(Security.cusip == cusip).first()
@@ -116,8 +115,8 @@ def get_security_from_db(cusip: str) -> Optional[dict]:
         }
 
 
-def save_security_to_db(cusip: str, ticker: Optional[str], name: Optional[str],
-                        sector: Optional[str], industry: Optional[str]) -> None:
+def save_security_to_db(cusip: str, ticker: str | None, name: str | None,
+                        sector: str | None, industry: str | None) -> None:
     """写入 securities 表作为缓存"""
     with get_session() as session:
         existing = session.query(Security).filter(Security.cusip == cusip).first()
@@ -141,8 +140,8 @@ def save_security_to_db(cusip: str, ticker: Optional[str], name: Optional[str],
             session.add(sec)
 
 
-async def resolve_cusip(cusip: str, prefilled_ticker: Optional[str] = None,
-                        prefilled_name: Optional[str] = None) -> dict:
+async def resolve_cusip(cusip: str, prefilled_ticker: str | None = None,
+                        prefilled_name: str | None = None) -> dict:
     """
     解析单个 CUSIP，返回 {"cusip", "ticker", "name", "sector", "industry"}
     """

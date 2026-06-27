@@ -3,13 +3,14 @@
 为数据库中已有的 holdings 补充 ticker 信息
 同时修复错误 ticker（如 COM, CL A 等 titleOfClass 值）
 """
-import sys
 import asyncio
+import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from loguru import logger
+from sqlalchemy import text
 
 from db.engine import get_session
 from db.models import Holding, Security

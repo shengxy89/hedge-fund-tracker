@@ -2,20 +2,20 @@
 定时任务入口
 使用 schedule 库实现每日检查
 """
-import time
 import asyncio
-from datetime import datetime, date
+import time
+from datetime import date
 
-import config.logging  # noqa: F401
 import schedule
 from loguru import logger
 
+import config.logging  # noqa: F401
+from analytics.runner import run_analytics
 from config.settings import get_settings
 from db.engine import get_session
 from db.models import Filing, Fund
 from etl.fetcher import fetch_filings_sec
 from etl.pipeline import run_etl_pipeline
-from analytics.runner import run_analytics
 
 settings = get_settings()
 

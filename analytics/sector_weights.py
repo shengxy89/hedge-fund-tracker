@@ -2,21 +2,19 @@
 GICS 行业板块权重计算
 """
 from datetime import datetime
-from typing import Optional
 
 import polars as pl
 from loguru import logger
 from sqlalchemy import text
 
 from db.engine import engine
-from db.models import SectorWeight
 from utils import date_to_quarter
 
 
 def compute_sector_weights_for_fund(fund_id: int, report_date) -> pl.DataFrame:
     """计算单个基金某季度的板块权重"""
     query = """
-    SELECT 
+    SELECT
         COALESCE(s.sector, 'Unknown') as sector,
         COUNT(*) as holding_count,
         SUM(h.value) as total_value
@@ -27,14 +25,17 @@ def compute_sector_weights_for_fund(fund_id: int, report_date) -> pl.DataFrame:
     """
     date_str = report_date.isoformat() if hasattr(report_date, 'isoformat') else str(report_date)
     with engine.connect() as conn:
-        df = pl.read_database(query, conn, execute_options={"parameters": {"fund_id": fund_id, "report_date": date_str}})
+        df = pl.read_database(
+            query, conn,
+            execute_options={"parameters": {"fund_id": fund_id, "report_date": date_str}},
+        )
 
     if df.is_empty():
         return df
 
     # 计算该基金总市值
     total_query = """
-    SELECT SUM(value) as total FROM holdings 
+    SELECT SUM(value) as total FROM holdings
     WHERE fund_id = :fund_id AND report_date = :report_date
     """
     with engine.connect() as conn:
@@ -55,15 +56,13 @@ def compute_sector_weights_for_fund(fund_id: int, report_date) -> pl.DataFrame:
     return df.select(["fund_id", "quarter", "sector", "weight_pct", "holding_count", "total_value"])
 
 
-def run_sector_weights(quarter: Optional[str] = None):
+def run_sector_weights(quarter: str | None = None):
     """运行板块权重计算"""
-    from db.models import Fund
-    from db.engine import get_session
 
     # 获取所有有数据的 (fund_id, report_date)
     query = """
-    SELECT DISTINCT fund_id, report_date 
-    FROM holdings 
+    SELECT DISTINCT fund_id, report_date
+    FROM holdings
     ORDER BY fund_id, report_date ASC
     """
     with engine.connect() as conn:
@@ -102,7 +101,6 @@ def run_sector_weights(quarter: Optional[str] = None):
             conn.execute(text(f"DELETE FROM sector_weights WHERE quarter IN ({placeholders})"), params)
         conn.commit()
 
-    import pandas as pd
     pd_df = combined.to_pandas()
     pd_df.to_sql("sector_weights", engine, if_exists="append", index=False)
 

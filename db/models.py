@@ -122,7 +122,8 @@ class HoldingDelta(Base):
     value_change = Column(BigInteger, nullable=False)
     weight_prev = Column(Float, default=0)
     weight_curr = Column(Float, default=0)
-    weight_change_pct = Column(Float, comment="权重变化 = weight_curr - weight_prev")
+    weight_change_pct = Column(Float, default=0, comment="权重变化百分点，weight_curr - weight_prev")
+    value_change_pct = Column(Float, comment="市值变化百分比，value_change / value_prev * 100")
 
     __table_args__ = (
         UniqueConstraint("fund_id", "cusip", "put_call", "quarter", name="uq_delta"),
@@ -149,6 +150,12 @@ class HoldingDeltaNorm(Base):
     conviction_score = Column(Float, comment="综合置信度")
     holder_count = Column(Integer, default=0, comment="当前季度持有该标的的基金数")
     crowding_score = Column(Float, default=0, comment="拥挤度 = holder_count / 总基金数")
+    total_value_change = Column(BigInteger, comment="共识方向下总市值变化，千美元")
+    avg_value_change = Column(Float, comment="平均市值变化，千美元")
+    total_abs_value_change = Column(BigInteger, comment="绝对市值变化合计，千美元")
+    avg_value_change_pct = Column(Float, comment="平均市值变化百分比")
+    avg_weight_curr = Column(Float, comment="当前平均权重")
+    total_weight_curr = Column(Float, comment="当前权重合计")
 
     __table_args__ = (
         UniqueConstraint("quarter", "cusip", "put_call", "consensus_action", name="uq_delta_norm"),
@@ -166,12 +173,35 @@ class FundOverlap(Base):
     fund_b_id = Column(Integer, ForeignKey("funds.fund_id"), nullable=False)
     quarter = Column(String(7), nullable=False, comment="格式: 2024Q3")
     jaccard_score = Column(Float, nullable=False, comment="Jaccard 相似度 0~1")
+    weighted_jaccard_score = Column(Float, comment="按持仓权重计算的加权 Jaccard")
     overlap_count = Column(Integer, nullable=False, comment="重叠股票数量")
     overlap_tickers = Column(Text, comment="重叠 ticker 列表, 逗号分隔")
+    overlap_value_pct_a = Column(Float, comment="重合持仓占基金A 13F市值百分比")
+    overlap_value_pct_b = Column(Float, comment="重合持仓占基金B 13F市值百分比")
 
     __table_args__ = (
         UniqueConstraint("fund_a_id", "fund_b_id", "quarter", name="uq_overlap"),
         Index("ix_overlap_quarter", "quarter"),
+    )
+
+
+class FundConcentration(Base):
+    """单基金集中度指标表"""
+    __tablename__ = "fund_concentrations"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    fund_id = Column(Integer, ForeignKey("funds.fund_id"), nullable=False)
+    quarter = Column(String(7), nullable=False, comment="格式: 2024Q3")
+    top_1_weight = Column(Float, comment="第一大持仓权重 %")
+    top_5_weight = Column(Float, comment="前五大持仓权重 %")
+    top_10_weight = Column(Float, comment="前十大持仓权重 %")
+    hhi = Column(Float, comment="赫芬达尔-赫希曼指数")
+    holding_count = Column(Integer, comment="持仓股票数量")
+    total_value = Column(BigInteger, comment="该期总市值（千美元）")
+
+    __table_args__ = (
+        UniqueConstraint("fund_id", "quarter", name="uq_fund_concentration"),
+        Index("ix_concentration_quarter", "quarter"),
     )
 
 

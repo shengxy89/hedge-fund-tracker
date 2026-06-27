@@ -8,8 +8,8 @@ from pathlib import Path
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from db.models import Base
 from db.engine import engine
+from db.models import Base
 
 
 def init_database():

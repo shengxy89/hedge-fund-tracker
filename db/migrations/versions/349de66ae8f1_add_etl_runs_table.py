@@ -7,16 +7,15 @@ Create Date: 2026-06-17 21:12:59.093411
 只创建 etl_runs 表；SQLite 不支持 ALTER COLUMN SET NOT NULL 等操作，
 其他 autogenerate 噪声 op 已手工删除。
 """
-from typing import Sequence, Union
+from collections.abc import Sequence
 
-from alembic import op
 import sqlalchemy as sa
-
+from alembic import op
 
 revision: str = '349de66ae8f1'
-down_revision: Union[str, Sequence[str], None] = '456edea1a8de'
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
+down_revision: str | Sequence[str] | None = '456edea1a8de'
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:

@@ -3,8 +3,6 @@
 """
 import pandas as pd
 
-from analytics.crowding import get_crowding_report
-
 
 def test_crowding_basic():
     """测试基本拥挤度公式"""

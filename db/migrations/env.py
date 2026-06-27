@@ -1,15 +1,13 @@
+import sys
 from logging.config import fileConfig
-
-from sqlalchemy import engine_from_config, pool
+from pathlib import Path
 
 from alembic import context
 
-import sys
-from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from db.models import Base
 from db.engine import engine
+from db.models import Base
 
 # this is the Alembic Config object
 config = context.config

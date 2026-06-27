@@ -4,22 +4,23 @@ ETL Pipeline 主流程编排
 import asyncio
 import json
 from datetime import date, datetime
-from typing import Optional
 
 from loguru import logger
 
 from config.settings import get_settings
-from db.engine import get_session, engine
-from db.models import EtlRun, Filing, Holding, Fund
-from etl.fetcher import fetch_fund_data
+from db.engine import engine, get_session
+from db.models import EtlRun, Filing, Fund, Holding, Security
 from etl.amendment_handler import get_latest_filings_by_quarter
 from etl.cusip_resolver import resolve_cusips_batch
-from utils import date_to_quarter
+from etl.fetcher import fetch_fund_data
 
 settings = get_settings()
 
 
-async def process_single_fund(fund_id: int, cik: str, name: str, quarters: int = 8, semaphore: asyncio.Semaphore = None) -> dict:
+async def process_single_fund(
+    fund_id: int, cik: str, name: str, quarters: int = 8,
+    semaphore: asyncio.Semaphore = None,
+) -> dict:
     """处理单个基金：抓取 -> 解析 -> 入库"""
     logger.info(f"Processing fund {name} (CIK: {cik})")
 
@@ -37,14 +38,15 @@ async def process_single_fund(fund_id: int, cik: str, name: str, quarters: int =
         all_cusips = set()
         prefilled = {}  # cusip -> {"ticker", "name"}
         for filing in filings:
-            holdings = holdings_map.get(filing.get("report_date", ""), [])
+            acc = filing.get("accession_number", "")
+            holdings = holdings_map.get(acc, [])
             for h in holdings:
                 cusip = h.get("cusip", "")
                 if not cusip:
                     continue
                 all_cusips.add(cusip)
-                # 保留 prefilled ticker/name（如果有）
-                if h.get("ticker") and cusip not in prefilled:
+                # 保留 prefilled ticker/name（只要有就保留，避免 OpenFIGI 失败时 securities 表为空）
+                if cusip not in prefilled and (h.get("ticker") or h.get("name")):
                     prefilled[cusip] = {"ticker": h.get("ticker"), "name": h.get("name")}
 
         # 批量解析 CUSIP
@@ -56,12 +58,19 @@ async def process_single_fund(fund_id: int, cik: str, name: str, quarters: int =
                     cusip_info[cusip]["ticker"] = info["ticker"]
                 if info.get("name"):
                     cusip_info[cusip]["name"] = info["name"]
+            else:
+                cusip_info[cusip] = {
+                    "cusip": cusip,
+                    "ticker": info.get("ticker"),
+                    "name": info.get("name"),
+                    "sector": None,
+                    "industry": None,
+                }
 
         # 2. 入库
         with get_session() as session:
             # 一次性批量查询已存在的 Filing accession_number，避免逐个 N+1 查询
             acc_numbers = [f.get("accession_number") for f in filings if f.get("accession_number")]
-            existing_acc_set: set[str] = set()
             existing_by_acc: dict[str, Filing] = {}
             if acc_numbers:
                 existing_filings = (
@@ -69,7 +78,6 @@ async def process_single_fund(fund_id: int, cik: str, name: str, quarters: int =
                     .filter(Filing.accession_number.in_(acc_numbers))
                     .all()
                 )
-                existing_acc_set = {f.accession_number for f in existing_filings}
                 existing_by_acc = {f.accession_number: f for f in existing_filings}
 
             total_holdings = 0
@@ -101,10 +109,10 @@ async def process_single_fund(fund_id: int, cik: str, name: str, quarters: int =
                     session.add(f)
                     session.flush()
 
-                # 获取该 report_date 的 holdings
-                holdings = holdings_map.get(r_date_str, [])
+                # 获取该 accession_number 对应的 holdings
+                holdings = holdings_map.get(acc, [])
                 if not holdings:
-                    logger.warning(f"No holdings data for {name} on {r_date_str}")
+                    logger.warning(f"No holdings data for {name} accession {acc}")
                     continue
 
                 # 合并同一 CUSIP+putCall 的重复记录（累加 shares 和 value）
@@ -144,6 +152,29 @@ async def process_single_fund(fund_id: int, cik: str, name: str, quarters: int =
                 else:
                     f.total_value = total_value
                     f.holding_count = len(holdings)
+
+                # 确保每个 CUSIP 在 securities 表中至少有一行记录（analytics join 前提）
+                for h in holdings:
+                    cusip = h.get("cusip", "")
+                    if not cusip:
+                        continue
+                    sec = session.query(Security).filter(Security.cusip == cusip).first()
+                    resolved = cusip_info.get(cusip, {})
+                    ticker = h.get("ticker") or resolved.get("ticker")
+                    sec_name = h.get("name") or resolved.get("name")
+                    if sec:
+                        if ticker and not sec.ticker:
+                            sec.ticker = ticker
+                        if sec_name and not sec.name:
+                            sec.name = sec_name
+                    else:
+                        session.add(Security(
+                            cusip=cusip,
+                            ticker=ticker,
+                            name=sec_name,
+                            sector=resolved.get("sector"),
+                            industry=resolved.get("industry"),
+                        ))
 
                 # 插入 holdings
                 for h in holdings:
@@ -185,7 +216,7 @@ async def process_single_fund(fund_id: int, cik: str, name: str, quarters: int =
 
 
 def _log_etl_run(
-    run_id: Optional[int],
+    run_id: int | None,
     *,
     status: str,
     funds_total: int,
@@ -193,8 +224,8 @@ def _log_etl_run(
     funds_failed: int,
     funds_no_filings: int,
     holdings_inserted: int,
-    error_message: Optional[str] = None,
-    meta: Optional[dict] = None,
+    error_message: str | None = None,
+    meta: dict | None = None,
 ) -> None:
     """写入/更新 etl_runs 记录。run_id 为 None 时插入新记录并返回 id。"""
     try:
@@ -227,7 +258,7 @@ def _log_etl_run(
         return None
 
 
-async def run_etl_pipeline(fund_ciks: Optional[list[str]] = None, quarters: int = 8) -> dict:
+async def run_etl_pipeline(fund_ciks: list[str] | None = None, quarters: int = 8) -> dict:
     """
     ETL Pipeline 主编排
     :param fund_ciks: 指定 CIK 列表，None 表示全部 active 基金
@@ -311,5 +342,8 @@ async def run_etl_pipeline(fund_ciks: Optional[list[str]] = None, quarters: int 
         meta={"quarters": quarters, "source": "sec"},
     )
 
-    logger.info(f"ETL complete: {summary['success']} success, {summary['failed']} failed, {summary['no_filings']} no filings")
+    logger.info(
+        f"ETL complete: {summary['success']} success, {summary['failed']} failed, "
+        f"{summary['no_filings']} no filings"
+    )
     return summary

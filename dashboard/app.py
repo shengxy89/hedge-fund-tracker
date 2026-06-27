@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import streamlit as st
 
 import config.logging  # noqa: F401 — activate loguru handlers
+from dashboard.components.disclaimer import filing_delay_badge
 from dashboard.components.filters import render_sidebar
 from dashboard.data_access import get_summary_metrics
 from dashboard.theme import init_theme
@@ -55,6 +56,12 @@ def main() -> None:
     col2.metric("Unique Stocks", metrics["total_stocks"])
     col3.metric("Most Active Fund", metrics["active_fund"], f"{metrics['active_count']} changes")
     col4.metric("Most Crowded", metrics["crowded_ticker"], f"{metrics['crowded_count']} holders")
+
+    # 数据延迟徽章
+    filing_delay_badge(
+        report_date=metrics.get("report_date"),
+        filing_date=metrics.get("latest_filing_date"),
+    )
 
     st.markdown("---")
 

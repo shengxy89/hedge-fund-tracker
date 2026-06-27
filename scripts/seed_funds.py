@@ -2,8 +2,8 @@
 """
 导入基金清单
 """
-import sys
 import csv
+import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -18,7 +18,7 @@ def seed_funds(csv_path: str = None):
 
     print(f"Reading fund list from {csv_path}...")
 
-    with open(csv_path, "r", encoding="utf-8") as f:
+    with open(csv_path, encoding="utf-8") as f:
         reader = csv.DictReader(f)
         funds = list(reader)
 
