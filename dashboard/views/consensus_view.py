@@ -9,7 +9,14 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from dashboard.data_access import get_consensus_fund_detail, get_consensus_kpi, get_consensus_signals
+from dashboard.components.charts import render_bubble
+from dashboard.data_access import (
+    get_consensus_fund_detail,
+    get_consensus_kpi,
+    get_consensus_signals,
+    get_signal_followup,
+)
+from dashboard.utils.exporters import render_csv_download_button
 from dashboard.utils.formatters import format_currency, format_pct, get_action_badge
 
 
@@ -168,6 +175,8 @@ def _render_signals_table(df: pd.DataFrame, quarter: str) -> None:
         },
     )
 
+    render_csv_download_button(show_df, f"consensus_signals_{quarter}.csv")
+
     # 展开查看基金明细
     st.markdown("---")
     st.subheader("🔍 标的基金明细")
@@ -230,6 +239,26 @@ def _render_signals_table(df: pd.DataFrame, quarter: str) -> None:
         else:
             st.info("暂无该基金明细数据。")
 
+        # 信号有效性追踪：信号发出后下一季持仓变化（非真实收益回测）
+        followup = get_signal_followup(cusip, quarter)
+        if followup and followup.get("next_quarter"):
+            st.markdown("**📈 信号有效性追踪（下一季）**")
+            fc1, fc2, fc3, fc4 = st.columns(4)
+            fc1.metric("信号季持有人数", followup["signal_holders"])
+            fc2.metric(
+                f"{followup['next_quarter']} 持有人数",
+                followup["next_holders"],
+            )
+            fc3.metric(
+                "持有人数变化",
+                followup["next_holders"] - followup["signal_holders"],
+            )
+            fc4.metric(
+                "持仓市值变化($K)",
+                followup["next_value"] - followup["signal_value"],
+            )
+            st.caption("信号有效性追踪：基于持仓变化，非真实收益回测。")
+
 
 def render_consensus_view(quarter: str) -> None:
     """渲染共识信号视图主入口"""
@@ -288,6 +317,27 @@ def render_consensus_view(quarter: str) -> None:
         min_score=min_score,
         top_n=top_n,
     )
+
+    # 二维定位：信号强度 × 拥挤度（气泡大小=置信度，颜色=动作）
+    if not df.empty:
+        bubble_df = df[[
+            "ticker", "issuer", "action", "signal_score",
+            "crowding_score", "conviction_score",
+        ]].copy()
+        render_bubble(
+            bubble_df,
+            x="signal_score",
+            y="crowding_score",
+            size="conviction_score",
+            color="action",
+            hover_name="ticker",
+            title="信号强度 × 拥挤度 四象限定位（气泡=置信度）",
+        )
+        st.caption(
+            "右上=高信号高拥挤（late/crowded 风险）；"
+            "右下=高信号低拥挤（early consensus 机会）"
+        )
+        st.markdown("---")
 
     # 渲染表格
     _render_signals_table(df, quarter)

@@ -7,6 +7,7 @@ import streamlit as st
 from sqlalchemy import text
 
 from dashboard.data_access import get_crowding_df
+from dashboard.utils.exporters import render_csv_download_button
 from dashboard.utils.formatters import display_label
 from db.engine import engine
 from utils import get_prev_quarter, quarter_to_dates
@@ -31,7 +32,7 @@ def render_crowding_view(quarter: str) -> None:
     )
 
     if group_mode == "All Sectors":
-        _render_all_sectors(df)
+        _render_all_sectors(df, quarter)
     else:
         _render_by_sector(df)
 
@@ -41,7 +42,7 @@ def render_crowding_view(quarter: str) -> None:
     _render_movers(quarter)
 
 
-def _render_all_sectors(df: pd.DataFrame) -> None:
+def _render_all_sectors(df: pd.DataFrame, quarter: str) -> None:
     """全部 sector 的主表."""
     st.subheader("Top 50 Most Crowded Stocks")
 
@@ -63,6 +64,8 @@ def _render_all_sectors(df: pd.DataFrame) -> None:
             "total_value": st.column_config.NumberColumn("Total Value($K)", format="%,d"),
         },
     )
+
+    render_csv_download_button(top50, f"crowding_top50_{quarter}.csv")
 
 
 def _render_by_sector(df: pd.DataFrame) -> None:

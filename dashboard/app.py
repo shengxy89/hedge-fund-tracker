@@ -19,6 +19,7 @@ from dashboard.views.compare_funds import render_compare_funds_view
 from dashboard.views.consensus_view import render_consensus_view
 from dashboard.views.crowding_leaderboard import render_crowding_view
 from dashboard.views.fund_drill import render_fund_drill_view
+from dashboard.views.fund_ranking import render_fund_ranking_view
 from dashboard.views.heatmap import render_heatmap_view
 from dashboard.views.options_view import render_options_view
 from dashboard.views.overview import render_overview_view
@@ -75,6 +76,7 @@ def main() -> None:
         "🛡️ Options",
         "⚖️ Compare Funds",
         "🎯 Consensus",
+        "🏆 Fund Ranking",
     ])
 
     with tabs[0]:
@@ -84,10 +86,10 @@ def main() -> None:
         render_heatmap_view(selected_quarter, selected_fund_ids, selected_sectors)
 
     with tabs[2]:
-        render_fund_drill_view(selected_quarter)
+        render_fund_drill_view(selected_quarter, selected_fund_ids, selected_sectors)
 
     with tabs[3]:
-        render_stock_drill_view(selected_quarter)
+        render_stock_drill_view(selected_quarter, selected_fund_ids, selected_sectors)
 
     with tabs[4]:
         render_crowding_view(selected_quarter)
@@ -96,10 +98,13 @@ def main() -> None:
         render_options_view(selected_quarter)
 
     with tabs[6]:
-        render_compare_funds_view(selected_quarter)
+        render_compare_funds_view(selected_quarter, selected_fund_ids)
 
     with tabs[7]:
         render_consensus_view(selected_quarter)
+
+    with tabs[8]:
+        render_fund_ranking_view(selected_quarter)
 
 
 if __name__ == "__main__":

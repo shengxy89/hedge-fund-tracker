@@ -5,21 +5,27 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from dashboard.components.charts import render_line_chart, render_pie_chart
+from dashboard.components.charts import render_horizontal_bar, render_line_chart, render_pie_chart
 from dashboard.components.disclaimer import filing_delay_badge, sold_threshold_disclaimer
 from dashboard.components.kpi_cards import kpi_fund_cards
 from dashboard.data_access import (
-    get_available_quarters,
+    get_concentration_trend,
     get_filing_info,
+    get_fund_concentration,
     get_fund_deltas,
     get_fund_holdings,
     get_funds_df,
+    get_sector_attribution,
     get_sector_weights_fund,
 )
+from dashboard.utils.exporters import render_csv_download_button
 from dashboard.utils.formatters import display_label, get_action_badge
+from dashboard.utils.quarters import get_history_quarters_ascending
 
 
-def render_fund_drill_view(quarter: str) -> None:
+def render_fund_drill_view(
+    quarter: str, fund_ids: list[int] | None = None, sectors: list[str] | None = None
+) -> None:
     """渲染基金穿透视图."""
     st.header("Fund Drill-down")
 
@@ -27,6 +33,12 @@ def render_fund_drill_view(quarter: str) -> None:
     if funds_df.empty:
         st.info("No funds available.")
         return
+    # 全局筛选：限定基金范围
+    if fund_ids:
+        funds_df = funds_df[funds_df["fund_id"].isin(fund_ids)]
+        if funds_df.empty:
+            st.info("选中的基金无数据。")
+            return
 
     fund_name = st.selectbox("Select Fund", options=funds_df["name"].tolist(), key="fd_fund")
     fund_id = int(funds_df[funds_df["name"] == fund_name]["fund_id"].values[0])
@@ -42,7 +54,7 @@ def render_fund_drill_view(quarter: str) -> None:
     with tabs[0]:
         _render_fund_overview(fund_id, fund_info, quarter, filing_info)
     with tabs[1]:
-        _render_fund_holdings_tab(fund_id, quarter)
+        _render_fund_holdings_tab(fund_id, quarter, sectors)
     with tabs[2]:
         _render_fund_deltas_tab(fund_id, quarter)
     with tabs[3]:
@@ -59,9 +71,17 @@ def _render_fund_overview(
     holdings = get_fund_holdings(fund_id, quarter)
     total_val = int(holdings["value"].sum()) if not holdings.empty else 0
     holding_count = len(holdings)
-    top10_weight = (
-        holdings.head(10)["weight_pct"].sum() / 100 if not holdings.empty else 0
-    )
+
+    # 集中度：优先读 fund_concentrations 表（含 HHI），否则当场从持仓估算
+    concentration = get_fund_concentration(fund_id, quarter)
+    if concentration:
+        top10_weight = concentration["top_10_weight"] / 100
+        hhi = concentration["hhi"]
+    else:
+        top10_weight = (
+            holdings.head(10)["weight_pct"].sum() / 100 if not holdings.empty else 0
+        )
+        hhi = None
 
     # 新建/清仓占比（非真实换手率，仅描述本季新建+清仓仓位占当前持仓数的比例）
     deltas = get_fund_deltas(fund_id, quarter)
@@ -71,7 +91,7 @@ def _render_fund_overview(
 
     kpi_fund_cards(total_val, holding_count, top10_weight, new_sold_ratio)
 
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     with col1:
         st.metric("Manager", fund_info.get("manager", "N/A") or "N/A")
         st.metric("Strategy", fund_info.get("strategy", "N/A") or "N/A")
@@ -81,6 +101,12 @@ def _render_fund_overview(
             "Amendment",
             "Yes" if filing_info.get("is_amendment") else "No",
         )
+    with col3:
+        st.metric(
+            "HHI 集中度",
+            f"{hhi:.4f}" if hhi is not None else "N/A",
+            help="赫芬达尔指数，越高越集中（0=完全分散，1=单股）",
+        )
 
     st.caption(
         f"Report Date: {filing_info.get('report_date', 'N/A')}  |  "
@@ -88,8 +114,15 @@ def _render_fund_overview(
         f"Total Holdings: {filing_info.get('holding_count', 'N/A')}"
     )
 
+    # 集中度趋势（判断风格漂移：集中↔分散）
+    trend = get_concentration_trend(fund_id)
+    if not trend.empty:
+        render_line_chart(trend, "quarter", "hhi", None, "HHI 集中度趋势（越高越集中）")
 
-def _render_fund_holdings_tab(fund_id: int, quarter: str) -> None:
+
+def _render_fund_holdings_tab(
+    fund_id: int, quarter: str, sectors: list[str] | None = None
+) -> None:
     """当季持仓 Tab."""
     st.subheader("Current Holdings")
 
@@ -108,6 +141,10 @@ def _render_fund_holdings_tab(fund_id: int, quarter: str) -> None:
         )
 
     filtered = holdings.copy()
+    if sectors:
+        filtered = filtered[
+            filtered["sector"].fillna("Unknown").isin(list(sectors) + ["Unknown"])
+        ]
     if search:
         mask = (
             filtered["ticker"].astype(str).str.contains(search, case=False, na=False)
@@ -143,6 +180,8 @@ def _render_fund_holdings_tab(fund_id: int, quarter: str) -> None:
         },
     )
 
+    render_csv_download_button(display, f"holdings_{fund_id}_{quarter}.csv")
+
 
 def _render_fund_deltas_tab(fund_id: int, quarter: str) -> None:
     """调仓详情 Tab."""
@@ -171,16 +210,26 @@ def _render_fund_deltas_tab(fund_id: int, quarter: str) -> None:
                 disp.columns = ["Ticker", "Shares Δ", "Value Δ($K)"]
                 st.dataframe(disp, use_container_width=True, hide_index=True)
 
+    render_csv_download_button(deltas, f"deltas_{fund_id}_{quarter}.csv")
     sold_threshold_disclaimer()
+
+    # 板块归因：本季市值变化按板块分解
+    attribution = get_sector_attribution(fund_id, quarter)
+    if not attribution.empty:
+        st.subheader("Sector Attribution")
+        st.caption("本季市值变化按板块分解（基于持仓变化，非真实收益归因）")
+        render_horizontal_bar(
+            attribution, x="value_change", y="sector",
+            title="板块贡献（正=加仓贡献，负=减仓贡献）",
+        )
 
     # 历史趋势
     st.subheader("Top 5 Holdings History")
     holdings = get_fund_holdings(fund_id, quarter)
     if not holdings.empty:
         top5 = holdings.head(5)["ticker"].dropna().tolist()
-        all_quarters = get_available_quarters()
         hist_data = []
-        for q in all_quarters[:8]:
+        for q in get_history_quarters_ascending():
             h = get_fund_holdings(fund_id, q)
             if not h.empty:
                 for _, row in h[h["ticker"].isin(top5)].iterrows():
@@ -211,9 +260,8 @@ def _render_fund_sector_tab(fund_id: int, quarter: str) -> None:
 
     # 板块时序
     st.subheader("Sector Weight Trend")
-    all_quarters = get_available_quarters()[:8]
     sector_hist = []
-    for q in all_quarters:
+    for q in get_history_quarters_ascending():
         sw = get_sector_weights_fund(fund_id, q)
         if not sw.empty:
             for _, row in sw.iterrows():

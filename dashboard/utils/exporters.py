@@ -35,8 +35,3 @@ def render_csv_download_button(df: pd.DataFrame, filename: str = "export.csv") -
         file_name=filename,
         mime="text/csv",
     )
-
-
-def render_pdf_placeholder(title: str = "Report") -> None:
-    """PDF 导出占位（预留接口）."""
-    st.caption(f"📄 PDF export for '{title}' will be available in a future release.")

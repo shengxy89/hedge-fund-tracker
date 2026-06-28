@@ -326,6 +326,9 @@ def get_stock_jaccard_overlaps(ticker: str, quarter: str) -> pd.DataFrame:
         fa.name as fund_a_name,
         fb.name as fund_b_name,
         fo.jaccard_score,
+        fo.weighted_jaccard_score,
+        fo.overlap_value_pct_a,
+        fo.overlap_value_pct_b,
         fo.overlap_count,
         fo.overlap_tickers
     FROM fund_overlaps fo
@@ -702,7 +705,8 @@ def get_fund_pair_overlap_detail(
 
         # Jaccard 历史趋势
         jaccard_q = """
-        SELECT quarter, jaccard_score, overlap_count
+        SELECT quarter, jaccard_score, weighted_jaccard_score,
+               overlap_value_pct_a, overlap_value_pct_b, overlap_count
         FROM fund_overlaps
         WHERE (
             (fund_a_id = :fund_a AND fund_b_id = :fund_b)
@@ -895,6 +899,191 @@ def get_stock_sentiment(cusip: str, quarter: str) -> dict[str, Any]:
         "reduce_count": reduce_count,
         "net_inflow": new_count - sold_count,
         "holder_count": holder_count,
+    }
+
+
+# =============================================================================
+# 集中度查询（fund_concentrations）
+# =============================================================================
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_fund_concentration(fund_id: int, quarter: str) -> dict:
+    """获取某基金某季度的集中度指标（HHI / top-N 权重）."""
+    query = """
+        SELECT fc.top_1_weight, fc.top_5_weight, fc.top_10_weight,
+               fc.hhi, fc.holding_count, fc.total_value
+        FROM fund_concentrations fc
+        WHERE fc.fund_id = :fund_id AND fc.quarter = :quarter
+    """
+    with engine.connect() as conn:
+        df = pd.read_sql(text(query), conn, params={"fund_id": fund_id, "quarter": quarter})
+    if df.empty:
+        return {}
+    row = df.iloc[0]
+    return {
+        "top_1_weight": float(row["top_1_weight"] or 0),
+        "top_5_weight": float(row["top_5_weight"] or 0),
+        "top_10_weight": float(row["top_10_weight"] or 0),
+        "hhi": float(row["hhi"] or 0),
+        "holding_count": int(row["holding_count"] or 0),
+        "total_value": int(row["total_value"] or 0),
+    }
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_concentration_trend(fund_id: int) -> pd.DataFrame:
+    """获取某基金所有季度的集中度时序（HHI + top5/top10 权重）."""
+    query = """
+        SELECT quarter, hhi, top_5_weight, top_10_weight, holding_count, total_value
+        FROM fund_concentrations
+        WHERE fund_id = :fund_id
+        ORDER BY quarter ASC
+    """
+    with engine.connect() as conn:
+        return pd.read_sql(text(query), conn, params={"fund_id": fund_id})
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_concentration_ranking(quarter: str, top_n: int = 20) -> pd.DataFrame:
+    """获取全基金集中度排行（按 HHI 降序）."""
+    query = """
+        SELECT f.name as fund_name, fc.hhi, fc.top_5_weight, fc.top_10_weight,
+               fc.holding_count, fc.total_value
+        FROM fund_concentrations fc
+        JOIN funds f ON fc.fund_id = f.fund_id
+        WHERE fc.quarter = :quarter
+        ORDER BY fc.hhi DESC
+        LIMIT :limit
+    """
+    with engine.connect() as conn:
+        return pd.read_sql(text(query), conn, params={"quarter": quarter, "limit": top_n})
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_fund_avg_jaccard(quarter: str) -> pd.DataFrame:
+    """各基金在指定季度的平均加权 Jaccard 趋同度（与其他基金的均值）."""
+    query = """
+        WITH pair AS (
+            SELECT fund_a_id as fund_id, weighted_jaccard_score,
+                   overlap_value_pct_a as overlap_value_pct
+            FROM fund_overlaps WHERE quarter = :quarter
+            UNION ALL
+            SELECT fund_b_id, weighted_jaccard_score, overlap_value_pct_b
+            FROM fund_overlaps WHERE quarter = :quarter
+        )
+        SELECT f.name as fund_name,
+               AVG(p.weighted_jaccard_score) as avg_weighted_jaccard,
+               AVG(p.overlap_value_pct) as avg_overlap_value_pct
+        FROM pair p
+        JOIN funds f ON p.fund_id = f.fund_id
+        GROUP BY p.fund_id, f.name
+        ORDER BY avg_weighted_jaccard DESC
+    """
+    with engine.connect() as conn:
+        return pd.read_sql(text(query), conn, params={"quarter": quarter})
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_fund_pairs(quarter: str) -> pd.DataFrame:
+    """全市场基金对的加权 Jaccard 与重合市值占比（散点用）."""
+    query = """
+        SELECT fa.name as fund_a, fb.name as fund_b,
+               fo.weighted_jaccard_score, fo.overlap_value_pct_a
+        FROM fund_overlaps fo
+        JOIN funds fa ON fo.fund_a_id = fa.fund_id
+        JOIN funds fb ON fo.fund_b_id = fb.fund_id
+        WHERE fo.quarter = :quarter AND fo.weighted_jaccard_score IS NOT NULL
+    """
+    with engine.connect() as conn:
+        return pd.read_sql(text(query), conn, params={"quarter": quarter})
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_sector_flow(quarter: str) -> pd.DataFrame:
+    """各板块净资金流向（基于 holding_deltas.value_change；正=净买入，负=净卖出）."""
+    query = """
+        SELECT COALESCE(s.sector, 'Unknown') as sector,
+               SUM(d.value_change) as net_flow
+        FROM holding_deltas d
+        LEFT JOIN securities s ON d.cusip = s.cusip
+        WHERE d.quarter = :quarter
+          AND (d.put_call IS NULL OR d.put_call = '' OR d.put_call = 'NONE')
+        GROUP BY COALESCE(s.sector, 'Unknown')
+        ORDER BY net_flow DESC
+    """
+    with engine.connect() as conn:
+        return pd.read_sql(text(query), conn, params={"quarter": quarter})
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_sector_attribution(fund_id: int, quarter: str) -> pd.DataFrame:
+    """某基金本季市值变化按板块分解（归因：哪些板块贡献了 value_change）."""
+    query = """
+        SELECT COALESCE(s.sector, 'Unknown') as sector,
+               SUM(d.value_change) as value_change,
+               COUNT(*) as position_count
+        FROM holding_deltas d
+        LEFT JOIN securities s ON d.cusip = s.cusip
+        WHERE d.fund_id = :fund_id AND d.quarter = :quarter
+          AND (d.put_call IS NULL OR d.put_call = '' OR d.put_call = 'NONE')
+        GROUP BY COALESCE(s.sector, 'Unknown')
+        ORDER BY value_change DESC
+    """
+    with engine.connect() as conn:
+        return pd.read_sql(
+            text(query), conn, params={"fund_id": fund_id, "quarter": quarter}
+        )
+
+
+def _next_quarter(quarter: str) -> str:
+    """计算下一季度（如 2024Q3 -> 2024Q4，2024Q4 -> 2025Q1）."""
+    y, q = int(quarter[:4]), int(quarter[-1])
+    return f"{y + 1}Q1" if q == 4 else f"{y}Q{q + 1}"
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_signal_followup(cusip: str, signal_quarter: str) -> dict:
+    """共识信号发出后，下一季该标的的持仓变化（信号有效性追踪，非真实收益回测）."""
+    from utils import quarter_to_dates
+
+    next_q = _next_quarter(signal_quarter)
+    _, sig_end = quarter_to_dates(signal_quarter)
+    _, next_end = quarter_to_dates(next_q)
+    query = """
+        SELECT
+            (SELECT COUNT(DISTINCT fund_id) FROM holdings
+             WHERE cusip = :cusip AND report_date = :sig_rd
+               AND (put_call IS NULL OR put_call = '' OR put_call = 'NONE')) as signal_holders,
+            (SELECT COUNT(DISTINCT fund_id) FROM holdings
+             WHERE cusip = :cusip AND report_date = :next_rd
+               AND (put_call IS NULL OR put_call = '' OR put_call = 'NONE')) as next_holders,
+            (SELECT COALESCE(SUM(value), 0) FROM holdings
+             WHERE cusip = :cusip AND report_date = :sig_rd
+               AND (put_call IS NULL OR put_call = '' OR put_call = 'NONE')) as signal_value,
+            (SELECT COALESCE(SUM(value), 0) FROM holdings
+             WHERE cusip = :cusip AND report_date = :next_rd
+               AND (put_call IS NULL OR put_call = '' OR put_call = 'NONE')) as next_value
+    """
+    with engine.connect() as conn:
+        df = pd.read_sql(
+            text(query), conn,
+            params={
+                "cusip": cusip,
+                "sig_rd": sig_end.isoformat(),
+                "next_rd": next_end.isoformat(),
+            },
+        )
+    if df.empty:
+        return {}
+    row = df.iloc[0]
+    return {
+        "signal_quarter": signal_quarter,
+        "next_quarter": next_q,
+        "signal_holders": int(row["signal_holders"] or 0),
+        "next_holders": int(row["next_holders"] or 0),
+        "signal_value": int(row["signal_value"] or 0),
+        "next_value": int(row["next_value"] or 0),
     }
 
 

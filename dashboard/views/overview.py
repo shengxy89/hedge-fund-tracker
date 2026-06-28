@@ -5,12 +5,13 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from dashboard.components.charts import render_area_chart, render_horizontal_bar
+from dashboard.components.charts import render_area_chart, render_horizontal_bar, render_sankey
 from dashboard.components.disclaimer import filing_delay_badge
 from dashboard.components.kpi_cards import kpi_overview_cards
 from dashboard.data_access import (
     get_fund_activity_ranking,
     get_overview_kpi,
+    get_sector_flow,
     get_sector_rotation,
     get_top_movers,
 )
@@ -46,6 +47,9 @@ def render_overview_view(quarter: str) -> None:
     with col2:
         _render_fund_activity(quarter)
 
+    st.markdown("---")
+    _render_sector_flow(quarter)
+
 
 def _render_top_movers(quarter: str, direction: str, title: str) -> None:
     """渲染 Top movers 横向柱状图."""
@@ -80,7 +84,8 @@ def _render_top_movers(quarter: str, direction: str, title: str) -> None:
 
 def _render_sector_rotation() -> None:
     """渲染板块轮动堆叠面积图."""
-    df = get_sector_rotation(n_quarters=4)
+    n = st.session_state.get("history_n", 8)
+    df = get_sector_rotation(n_quarters=n)
     if df.empty:
         st.info("No sector rotation data.")
         return
@@ -91,7 +96,7 @@ def _render_sector_rotation() -> None:
         x="quarter",
         y="avg_weight_pct",
         color="sector",
-        title="Sector Weight % Over Last 4 Quarters",
+        title=f"Sector Weight % Over Last {n} Quarters",
     )
 
     with st.expander("View raw data"):
@@ -122,3 +127,32 @@ def _render_fund_activity(quarter: str) -> None:
             "Fund", "Manager", "Total", "NEW", "SOLD", "ADD", "REDUCE",
         ]
         st.dataframe(display, use_container_width=True, hide_index=True)
+
+
+def _render_sector_flow(quarter: str) -> None:
+    """渲染板块资金净流向 Sankey（左=减仓板块，右=加仓板块）."""
+    df = get_sector_flow(quarter)
+    if df.empty or df["net_flow"].fillna(0).abs().sum() == 0:
+        st.info("No sector flow data.")
+        return
+
+    st.subheader("Sector Capital Flow")
+    rows = []
+    for _, r in df.iterrows():
+        nf = r["net_flow"] or 0
+        if nf > 0:
+            rows.append({"source": r["sector"], "target": "净流入", "value": int(nf)})
+        elif nf < 0:
+            rows.append({"source": "净流出", "target": r["sector"], "value": int(abs(nf))})
+    if not rows:
+        st.info("No net flow this quarter.")
+        return
+    sankey_df = pd.DataFrame(rows)
+    render_sankey(
+        sankey_df, "source", "target", "value",
+        "板块资金净流向（左=减仓板块，右=加仓板块）",
+    )
+    st.caption(
+        "基于 holding_deltas 的 value_change 聚合；"
+        "13F 无法追踪同一笔资金跨板块移动，此处为板块层面净流向。"
+    )

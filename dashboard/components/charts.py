@@ -7,7 +7,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from dashboard.theme import SECTOR_COLORS
+from dashboard.theme import ACTION_COLORS, SECTOR_COLORS
 
 
 def render_pie_chart(
@@ -156,4 +156,122 @@ def render_area_chart(
         return
     fig = px.area(df, x=x, y=y, color=color, title=title)
     fig.update_layout(height=height)
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def render_scatter(
+    df: pd.DataFrame,
+    x: str,
+    y: str,
+    color: str | None = None,
+    title: str = "",
+    height: int = 500,
+    hover_name: str | None = None,
+    color_map: dict[str, str] | None = None,
+) -> None:
+    """渲染散点图（二维定位用，如加权 Jaccard vs 重合市值占比）."""
+    if df.empty:
+        st.info("No data available")
+        return
+    fig = px.scatter(
+        df,
+        x=x,
+        y=y,
+        color=color,
+        hover_name=hover_name,
+        title=title,
+        color_discrete_map=color_map or SECTOR_COLORS,
+    )
+    fig.update_layout(height=height)
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def render_bubble(
+    df: pd.DataFrame,
+    x: str,
+    y: str,
+    size: str,
+    color: str | None = None,
+    hover_name: str | None = None,
+    title: str = "",
+    height: int = 550,
+    color_map: dict[str, str] | None = None,
+) -> None:
+    """渲染气泡图（第三维映射 size，第四维映射 color，如共识信号四象限定位）."""
+    if df.empty:
+        st.info("No data available")
+        return
+    plot_df = df.copy()
+    # px 要求 size 列非负；缺失/负值裁剪为 0
+    if size in plot_df.columns:
+        plot_df[size] = plot_df[size].fillna(0).clip(lower=0)
+    fig = px.scatter(
+        plot_df,
+        x=x,
+        y=y,
+        size=size,
+        color=color,
+        hover_name=hover_name,
+        title=title,
+        color_discrete_map=color_map or ACTION_COLORS,
+    )
+    fig.update_layout(height=height)
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def render_treemap(
+    df: pd.DataFrame,
+    path: list[str],
+    values: str,
+    color: str | None = None,
+    title: str = "",
+    height: int = 550,
+    color_map: dict[str, str] | None = None,
+) -> None:
+    """渲染层级占比 treemap."""
+    if df.empty:
+        st.info("No data available")
+        return
+    fig = px.treemap(
+        df,
+        path=path,
+        values=values,
+        color=color,
+        title=title,
+        color_discrete_map=color_map or SECTOR_COLORS,
+    )
+    fig.update_layout(height=height)
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def render_sankey(
+    df: pd.DataFrame,
+    source_col: str,
+    target_col: str,
+    value_col: str,
+    title: str = "",
+    height: int = 550,
+    node_color: str = "#1F4E78",
+) -> None:
+    """渲染 Sankey 流向图（如板块资金净流向）."""
+    if df.empty or value_col not in df.columns:
+        st.info("No data available")
+        return
+    flow = df[df[value_col].fillna(0) > 0]
+    if flow.empty:
+        st.info("No flow data available")
+        return
+    labels = list(dict.fromkeys(
+        list(flow[source_col].astype(str)) + list(flow[target_col].astype(str))
+    ))
+    label_idx = {lab: i for i, lab in enumerate(labels)}
+    fig = go.Figure(data=[go.Sankey(
+        node=dict(label=labels, pad=15, thickness=18, color=node_color),
+        link=dict(
+            source=[label_idx[s] for s in flow[source_col].astype(str)],
+            target=[label_idx[t] for t in flow[target_col].astype(str)],
+            value=flow[value_col].tolist(),
+        ),
+    )])
+    fig.update_layout(title=title, height=height)
     st.plotly_chart(fig, use_container_width=True)

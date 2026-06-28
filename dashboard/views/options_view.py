@@ -5,6 +5,7 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
+from dashboard.components.charts import render_horizontal_bar
 from dashboard.data_access import get_options_summary
 from dashboard.theme import CALL_ORANGE, PUT_PURPLE
 from dashboard.utils.formatters import format_currency, format_shares
@@ -96,14 +97,13 @@ def _render_option_table(df: pd.DataFrame, option_type: str, color: str) -> None
         axis=1,
     )
 
-    import plotly.express as px
-    fig = px.bar(
+    top10["_opt"] = option_type
+    render_horizontal_bar(
         top10,
         x="total_value",
         y="label",
-        orientation="h",
-        color_discrete_sequence=[color],
+        color="_opt",
+        color_map={option_type: color},
         title=f"Top 10 {option_type} by Notional Value",
+        height=400,
     )
-    fig.update_layout(height=400, yaxis_categoryorder="total ascending")
-    st.plotly_chart(fig, use_container_width=True)

@@ -38,37 +38,6 @@ def sold_threshold_disclaimer(expanded: bool = False) -> None:
 
 
 # =============================================================================
-# PUT/CALL 说明
-# =============================================================================
-
-
-def options_legend() -> None:
-    """PUT/CALL 期权标识说明."""
-    st.markdown(
-        """
-        **期权持仓标识**
-
-        | 类型 | 颜色 | 含义 |
-        |------|------|------|
-        | 🟠 CALL | #F57C00 | 看涨期权 — 有权以约定价格买入标的 |
-        | 🟣 PUT | #7B1FA2 | 看跌期权 — 有权以约定价格卖出标的 |
-        | ⚪ 普通股 | — | 直接持有的普通股/ADR |
-
-        期权持仓以 **名义市值**（notional value）统计，不等同于实际风险敞口。
-        """
-    )
-
-
-def options_disclaimer() -> None:
-    """期权数据免责声明."""
-    st.caption(
-        "期权数据来源于 SEC 13F 报告中的 putCall 字段。"
-        "部分基金可能通过总收益互换（TRS）或其他衍生品持有敞口，"
-        "这些头寸不会出现在 13F 中。"
-    )
-
-
-# =============================================================================
 # 数据延迟徽章
 # =============================================================================
 
@@ -106,29 +75,3 @@ def filing_delay_badge(report_date: str | None, filing_date: str | None) -> None
             f"⏰ Data as of **{report_date}** · Filed **{filing_date}** · "
             f"Lag **{lag_days} days** (longer than typical 45-day window)"
         )
-
-
-# =============================================================================
-# 综合提示栏
-# =============================================================================
-
-
-def page_header_with_disclaimer(
-    title: str,
-    report_date: str | None = None,
-    filing_date: str | None = None,
-) -> None:
-    """标准页面头部：标题 + 延迟徽章 + SOLD 提示.
-
-    Args:
-        title: 页面标题.
-        report_date: 持仓报告日期.
-        filing_date: SEC 收到日期.
-    """
-    st.header(title)
-    filing_delay_badge(report_date, filing_date)
-    st.caption(
-        "📝 SOLD indicates the position was not reported in the current filing. "
-        "This may reflect complete liquidation **or** a reduction below the SEC "
-        "disclosure threshold. See disclaimer below for details."
-    )

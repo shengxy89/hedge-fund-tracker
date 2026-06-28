@@ -10,6 +10,7 @@ from dashboard.components.disclaimer import sold_threshold_disclaimer
 from dashboard.components.kpi_cards import kpi_stock_cards
 from dashboard.data_access import (
     get_crowding_df,
+    get_funds_df,
     get_stock_history,
     get_stock_holders,
     get_stock_info,
@@ -20,7 +21,9 @@ from dashboard.data_access import (
 from dashboard.utils.formatters import get_action_badge
 
 
-def render_stock_drill_view(quarter: str) -> None:
+def render_stock_drill_view(
+    quarter: str, fund_ids: list[int] | None = None, sectors: list[str] | None = None
+) -> None:
     """渲染个股穿透视图."""
     st.header("Stock Drill-down")
 
@@ -64,6 +67,12 @@ def render_stock_drill_view(quarter: str) -> None:
     else:
         holders = _get_holders_by_cusip(cusip, quarter)
         stock_info = {"name": stock_name}
+
+    # 全局筛选：限定基金范围（只看选中基金的持仓）
+    if fund_ids and not holders.empty:
+        funds_df = get_funds_df()
+        sel_names = set(funds_df[funds_df["fund_id"].isin(fund_ids)]["name"])
+        holders = holders[holders["fund_name"].isin(sel_names)]
 
     _render_stock_header(stock_info, ticker, stock_name, holders, quarter)
 

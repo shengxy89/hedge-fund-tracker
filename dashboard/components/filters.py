@@ -38,6 +38,18 @@ def render_sidebar() -> tuple[str | None, list[int], list[str], bool]:
     )
     st.session_state.selected_quarter = selected_quarter
 
+    # 历史范围（时序图用）
+    history_n = st.sidebar.slider(
+        "History Range (quarters)",
+        min_value=4,
+        max_value=20,
+        value=8,
+        step=1,
+        key="sb_history_n",
+        help="时序图展示的最近季度数",
+    )
+    st.session_state.history_n = history_n
+
     # 基金多选
     funds_df = get_funds_df()
     fund_options = dict(zip(funds_df["name"], funds_df["fund_id"]))
